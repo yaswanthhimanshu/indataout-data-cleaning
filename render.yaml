@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: indataout-data-cleaning
+    env: python
+    plan: free
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT app:app
+    autoDeploy: true
+    envVars:
+      - key: SECRET_KEY
+        value: "replace-this-with-a-long-random-string"
