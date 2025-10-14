@@ -1,0 +1,10 @@
+Flask
+werkzeug
+pandas
+numpy
+scikit-learn
+openpyxl
+xlrd
+python-dateutil
+gunicorn
+chardet

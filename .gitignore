@@ -1,0 +1,18 @@
+# Ignore uploaded and processed files
+uploads/
+cleaned/
+reports/
+
+# Python cache & compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+.env
+
+# System files
+.DS_Store
+Thumbs.db

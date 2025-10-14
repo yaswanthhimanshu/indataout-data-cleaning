@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>inDataOut — Data Cleaning</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <!-- HEADER -->
+  <header class="topbar">
+    <div class="container header-grid">
+      <div class="brand">
+        <div class="logo">🔶</div>
+        <div class="brand-text">
+          <div class="title">inDataOut</div>
+          <div class="subtitle">Automate your data cleaning — fast &amp; safe</div>
+        </div>
+      </div>
+      <nav class="top-actions">
+        <a class="cta" href="#upload">Upload dataset</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container main">
+    <!-- HERO -->
+    <section class="hero">
+      <h1 class="hero-title">
+        <span class="hero-strong">Clean</span>
+        <span class="hero-rest"> Your Data — Upload a dataset</span>
+      </h1>
+      <p class="hero-sub">
+        Supported: <strong>CSV, TSV, Excel (.xlsx/.xls), JSON</strong> — upload, preview issues, clean, and download.
+      </p>
+
+      <div class="hero-actions" id="upload">
+        <!-- UPLOAD CARD -->
+        <div class="drop-card">
+          <form id="uploadForm" action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data" class="upload-area">
+            <input id="fileInput" name="file" type="file" accept=".csv,.tsv,.txt,.xlsx,.xls,.json" hidden>
+            <div id="dropZone" class="drop-zone" role="button" tabindex="0" aria-describedby="upload-hint">
+              <div class="drop-content">
+                {% if uploaded_filename %}
+                  <div class="file-name">Uploaded: <strong>{{ uploaded_filename }}</strong></div>
+                  <div class="meta small">{% if analysis %}<span>{{ analysis.shape[0] }} rows × {{ analysis.shape[1] }} columns</span>{% endif %}</div>
+                  <div class="inline-ctrls">
+                    <button id="chooseBtn" type="button" class="choose-btn">Choose another</button>
+                    <a href="{{ url_for('index') }}" class="choose-btn neutral">Reset</a>
+                  </div>
+                {% else %}
+                  <div class="upload-icon">⬆️</div>
+                  <div class="drop-title">Drop your dataset here</div>
+                  <div class="drop-sub">or click to browse</div>
+                  <div class="inline-ctrls">
+                    <button id="chooseBtn" type="button" class="choose-btn">Choose File</button>
+                  </div>
+                  <div id="upload-hint" class="hint">Supported: CSV, TSV, TXT, Excel (.xlsx/.xls), JSON • Max 100MB</div>
+                {% endif %}
+              </div>
+            </div>
+            <input id="submitBtn" type="submit" style="display:none;">
+          </form>
+
+          <div class="privacy-line">
+            <span class="lock">🔒</span>
+            <div class="privacy-text">Your files are processed temporarily and deleted automatically after download.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- FEATURES -->
+    <section id="features" class="container-section">
+      <h2 class="section-title">What this tool does</h2>
+      <div class="cards compact-cards features">
+        <div class="card feature-card">
+          <div class="card-title">Automatic Cleaning</div>
+          <div class="card-val">Trims spaces, fills missing values, and normalizes data types.</div>
+        </div>
+        <div class="card feature-card">
+          <div class="card-title">Duplicate Removal</div>
+          <div class="card-val">Easily detects and removes duplicates.</div>
+        </div>
+        <div class="card feature-card">
+          <div class="card-title">Quick Preview</div>
+          <div class="card-val">View dataset shape and sample before cleaning.</div>
+        </div>
+        <div class="card feature-card">
+          <div class="card-title">Safe &amp; Local</div>
+          <div class="card-val">Processed locally on your server — no data storage.</div>
+        </div>
+      </div>
+    </section>
+
+    {% if analysis %}
+      <!-- ANALYSIS SECTION -->
+      <section class="analysis">
+        <div class="analysis-top">
+          <div>
+            <h3 class="small-title">Dataset Summary</h3>
+            <div class="meta">File: <strong>{{ uploaded_filename }}</strong></div>
+          </div>
+
+          <div class="actions-row">
+            <form id="cleanForm" action="{{ url_for('clean') }}" method="post" style="margin:0">
+              <input type="hidden" name="filename" value="{{ uploaded_filename }}">
+              <button type="submit" class="choose-btn">Clean Data</button>
+              <button id="advToggle" type="button" class="choose-btn secondary">Advanced Options</button>
+
+              <!-- Advanced Options -->
+              <div id="advanced" class="advanced-panel" style="display:none;margin-top:14px;">
+                <h4>Advanced Cleaning Options</h4>
+                <div class="adv-grid">
+                  <label class="adv-item"><input type="checkbox" name="remove_duplicates" value="1" checked> Remove duplicates
+                    <div class="adv-desc">Delete identical rows.</div>
+                  </label>
+                  <label class="adv-item"><input type="checkbox" name="drop_empty_columns" value="1" checked> Drop empty columns
+                    <div class="adv-desc">Remove columns with only missing values.</div>
+                  </label>
+                  <label class="adv-item"><input type="checkbox" name="drop_constant_columns" value="1" checked> Drop constant columns
+                    <div class="adv-desc">Remove columns that contain one repeated value.</div>
+                  </label>
+                  <label class="adv-item"><input type="checkbox" name="trim_whitespace" value="1" checked> Trim whitespace
+                    <div class="adv-desc">Remove spaces around text values.</div>
+                  </label>
+                  <label class="adv-item"><input type="checkbox" name="convert_dtypes" value="1" checked> Convert data types
+                    <div class="adv-desc">Convert numeric/date-like text to proper types.</div>
+                  </label>
+                  <label class="adv-item"><input type="checkbox" name="handle_outliers" value="1"> Handle outliers
+                    <div class="adv-desc">Detect and cap extreme numeric values.</div>
+                  </label>
+                  <label class="adv-item">Missing strategy:
+                    <select name="missing_strategy">
+                      <option value="fill" selected>Fill (recommended)</option>
+                      <option value="drop">Drop rows</option>
+                    </select>
+                    <div class="adv-desc">Decide how to handle missing data.</div>
+                  </label>
+                  <label class="adv-item">Fill numeric:
+                    <select name="fill_numeric">
+                      <option value="mean" selected>Mean</option>
+                      <option value="median">Median</option>
+                      <option value="zero">Zero</option>
+                    </select>
+                    <div class="adv-desc">Strategy for filling numeric missing values.</div>
+                  </label>
+                </div>
+                <div class="hint">Options apply when you click <strong>Clean Data</strong>.</div>
+              </div>
+            </form>
+          </div>
+        </div>
+
+        <!-- SUMMARY -->
+        <div class="cards summary-cards">
+          <div class="card"><div class="card-title">Rows</div><div class="card-val">{{ analysis.shape[0] }}</div></div>
+          <div class="card"><div class="card-title">Columns</div><div class="card-val">{{ analysis.shape[1] }}</div></div>
+          <div class="card"><div class="card-title">Missing</div><div class="card-val">{{ analysis.missing_count }} ({{ analysis.missing_percent }}%)</div></div>
+          <div class="card"><div class="card-title">Duplicates</div><div class="card-val">{{ analysis.duplicate_count }}</div></div>
+          <div class="card"><div class="card-title">Empty Columns</div><div class="card-val">{{ analysis.empty_columns|length }}</div></div>
+        </div>
+
+        <!-- PREVIEW -->
+        <div class="preview">
+          <h4 class="small-title">Data Preview</h4>
+          {% if analysis.preview and analysis.preview|length > 0 %}
+            <div class="table-wrap">
+              <table class="preview-table">
+                <thead>
+                  <tr>{% for col in analysis.preview[0].keys() %}<th>{{ col }}</th>{% endfor %}</tr>
+                </thead>
+                <tbody>
+                  {% for row in analysis.preview %}
+                    <tr>{% for val in row.values() %}<td>{{ val }}</td>{% endfor %}</tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% else %}
+            <div class="hint">No preview available for this dataset.</div>
+          {% endif %}
+        </div>
+      </section>
+    {% endif %}
+
+    {% if cleaned %}
+      <!-- CLEANED RESULT -->
+      <section class="cleaned">
+        <h3 class="small-title">Data Cleaned Successfully!</h3>
+        <div class="clean-grid">
+          <div><strong>Rows processed:</strong> {{ cleaned.report.rows_processed }}</div>
+          <div><strong>Rows after:</strong> {{ cleaned.report.rows_after }}</div>
+          <div><strong>Duplicates removed:</strong> {{ cleaned.report.duplicates_removed }}</div>
+          <div><strong>Outliers removed:</strong> {{ cleaned.report.outliers_removed }}</div>
+          <div><strong>Filled cells:</strong> {{ cleaned.report.filled_cells }}</div>
+          <div><strong>Columns renamed:</strong> {{ cleaned.report.columns_renamed }}</div>
+        </div>
+        <div class="download-row">
+          <a class="choose-btn" href="{{ url_for('download_cleaned', filename=cleaned.cleaned_filename) }}">⬇️ Download Cleaned CSV</a>
+          <a class="choose-btn secondary" href="{{ url_for('download_report', filename=cleaned.report_filename) }}">📄 Download Report</a>
+          <a class="choose-btn neutral" href="{{ url_for('index') }}">Upload Another File</a>
+        </div>
+      </section>
+    {% endif %}
+  </main>
+
+  <footer class="site-footer container">
+    <small class="muted">Developed by <span class="author">Yaswanth Himanshu</span></small>
+  </footer>
+
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
