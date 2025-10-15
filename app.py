@@ -26,10 +26,16 @@ import pandas as pd
 # Import your cleaning helpers (assumes cleaner.py exists and exports these)
 from cleaner import analyze_dataframe, clean_dataframe, save_report
 
+# PDF generation (optional feature)
+try:
+    from weasyprint import HTML
+    HAS_PDF = True
+except Exception:
+    HAS_PDF = False
+
 # Optional encoding detector
 try:
     import chardet
-
     HAS_CHARDET = True
 except Exception:
     HAS_CHARDET = False
@@ -100,33 +106,26 @@ def load_dataset(filepath: str):
 
     # JSON handling (respect encoding detection)
     if ext == ".json":
-        # Try reading with pandas first (it handles utf-8 normally)
         try:
             df = pd.read_json(filepath)
             return df
         except Exception:
-            # try manual decode attempts
             pass
 
-    # For text files (csv/tsv/txt/json) try encodings
     encodings_to_try = ["utf-8", "utf-8-sig", "latin1", "cp1252", "iso-8859-1"]
 
-    # If chardet present, try its guess first
     chardet_enc = detect_encoding_with_chardet(filepath)
     if chardet_enc and chardet_enc not in encodings_to_try:
         encodings_to_try.insert(0, chardet_enc)
 
-    # Determine sep automatically for .tsv
     sep = "\t" if filepath.lower().endswith(".tsv") else None
 
-    # Try reading as CSV/TSV/JSON with different encodings
     for enc in encodings_to_try:
         if enc in tried_encodings:
             continue
         tried_encodings.append(enc)
         try:
             if ext == ".json":
-                # For json, let pandas try with encoding
                 df = pd.read_json(filepath, encoding=enc)
             else:
                 df = pd.read_csv(filepath, encoding=enc, sep=sep)
@@ -135,10 +134,8 @@ def load_dataset(filepath: str):
         except Exception as e:
             logging.debug(f"read failed for encoding={enc}: {e}")
 
-    # Try python engine fallback for csv/tsv
     try:
         if ext == ".json":
-            # Try reading JSON by decoding with replacement
             with open(filepath, "rb") as f:
                 raw = f.read()
             text = raw.decode("utf-8", errors="replace")
@@ -151,14 +148,13 @@ def load_dataset(filepath: str):
                 encoding="utf-8",
                 engine="python",
                 sep=sep,
-                on_bad_lines="warn",  # pandas >=1.3.0
+                on_bad_lines="warn",
             )
             logging.info("Loaded using python engine with utf-8 (fallback).")
             return df
     except Exception as e:
         logging.debug(f"python-engine fallback failed: {e}")
 
-    # Final fallback: decode binary with replacement and parse via StringIO
     try:
         with open(filepath, "rb") as f:
             raw = f.read()
@@ -174,7 +170,6 @@ def load_dataset(filepath: str):
         logging.exception("Final fallback failed to parse file.")
         raise ValueError(
             "Unable to parse the uploaded file as CSV/TSV/Excel/JSON. "
-            "Tried encodings: " + ", ".join(tried_encodings) + ". "
             "Consider re-saving the file as UTF-8 or uploading an Excel (.xlsx) file."
         ) from e
 
@@ -184,7 +179,6 @@ def load_dataset(filepath: str):
 # -----------------------------------
 @app.route("/", methods=["GET"])
 def index():
-    # If you have templates/index.html, render it; else show minimal page
     try:
         return render_template("index.html", uploaded_filename=None, analysis=None, cleaned=None)
     except Exception:
@@ -229,12 +223,10 @@ def upload():
         flash(f"Failed to save uploaded file: {e}")
         return redirect(url_for("index"))
 
-    # Analyze the file for messiness summary using robust loader
     try:
         df = load_dataset(file_path)
     except Exception as e:
         logging.exception("Failed to load dataset on upload")
-        # Provide helpful message in flash
         flash(f"Failed to read uploaded file: {e}")
         return redirect(url_for("index"))
 
@@ -254,11 +246,10 @@ def upload():
 
 
 # -----------------------------------
-# Clean data route (unchanged logic, uses load_dataset)
+# Clean data route
 # -----------------------------------
 @app.route("/clean", methods=["POST"])
 def clean():
-    # --- validate filename ---
     filename = request.form.get("filename")
     if not filename:
         flash("No file specified.")
@@ -269,7 +260,6 @@ def clean():
         flash("File not found on server.")
         return redirect(url_for("index"))
 
-    # --- load dataframe from the uploaded file ---
     try:
         df = load_dataset(file_path)
     except Exception as e:
@@ -277,21 +267,19 @@ def clean():
         flash(f"Failed to read dataset: {e}")
         return redirect(url_for("index"))
 
-    # --- helper to parse boolean-like form values ---
     def _bool_from_form(name, default=True):
         val = request.form.get(name)
         if val is None:
             return default
         return str(val).lower() in ("1", "true", "on", "yes")
 
-    # --- build options dict from advanced UI (fall back to defaults) ---
     try:
         opts = {
             "remove_duplicates": _bool_from_form("remove_duplicates", True),
             "drop_empty_columns": _bool_from_form("drop_empty_columns", True),
             "drop_constant_columns": _bool_from_form("drop_constant_columns", True),
             "trim_whitespace": _bool_from_form("trim_whitespace", True),
-            "rename_columns": True,  # keep renaming on by default
+            "rename_columns": True,
             "convert_dtypes": _bool_from_form("convert_dtypes", True),
             "handle_outliers": {"method": "iqr", "action": "remove", "multiplier": 1.5}
             if _bool_from_form("handle_outliers", False)
@@ -300,13 +288,17 @@ def clean():
             "missing_strategy": request.form.get("missing_strategy", "fill"),
             "fill_numeric": request.form.get("fill_numeric", "mean"),
             "fill_categorical": request.form.get("fill_categorical", "mode"),
+            # new options
+            "enable_fuzzy": _bool_from_form("enable_fuzzy", False),
+            "fuzzy_threshold": int(request.form.get("fuzzy_threshold", 88)),
+            "fuzzy_columns": [c.strip() for c in request.form.get("fuzzy_columns", "").split(",") if c.strip()] or None,
+            "knn_k": int(request.form.get("knn_k", 5)) if request.form.get("knn_k") else 5,
         }
     except Exception as e:
         logging.exception("Invalid advanced option")
         flash(f"Invalid advanced option: {e}")
         return redirect(url_for("index"))
 
-    # --- run cleaning pipeline ---
     try:
         cleaned_df, report = clean_dataframe(df, options=opts)
     except Exception as e:
@@ -314,7 +306,6 @@ def clean():
         flash(f"Error during cleaning: {e}")
         return redirect(url_for("index"))
 
-    # --- save cleaned CSV ---
     cleaned_basename = f"cleaned_{filename.rsplit('.', 1)[0]}.csv"
     cleaned_path = os.path.join(CLEANED_FOLDER, cleaned_basename)
     try:
@@ -324,7 +315,6 @@ def clean():
         flash(f"Failed to save cleaned file: {e}")
         return redirect(url_for("index"))
 
-    # --- save JSON report ---
     report_basename = f"report_{filename.rsplit('.', 1)[0]}.json"
     report_path = os.path.join(REPORTS_FOLDER, report_basename)
     try:
@@ -334,7 +324,6 @@ def clean():
         flash(f"Failed to save report: {e}")
         return redirect(url_for("index"))
 
-    # --- render same template showing cleaned results ---
     return render_template(
         "index.html",
         uploaded_filename=filename,
@@ -361,7 +350,7 @@ def download_cleaned(filename):
 
 
 # -----------------------------------
-# Download cleaning report
+# Download cleaning report (JSON)
 # -----------------------------------
 @app.route("/download/report/<path:filename>")
 def download_report(filename):
@@ -374,7 +363,36 @@ def download_report(filename):
 
 
 # -----------------------------------
-# List uploaded files (JSON) - handy for frontend
+# Download cleaning report (PDF)
+# -----------------------------------
+@app.route("/download/report_pdf/<path:filename>")
+def download_report_pdf(filename):
+    if not HAS_PDF:
+        flash("PDF generation not available (WeasyPrint not installed).")
+        return redirect(url_for("index"))
+
+    safe = secure_filename(filename)
+    full_json = os.path.join(REPORTS_FOLDER, safe)
+    if not os.path.exists(full_json):
+        flash("Report file not found.")
+        return redirect(url_for("index"))
+
+    import json
+    with open(full_json, "r", encoding="utf-8") as f:
+        report_data = json.load(f)
+
+    html_out = render_template("report_pdf.html", report=report_data, filename=safe)
+    pdf_bytes = HTML(string=html_out).write_pdf()
+    pdf_name = safe.replace(".json", ".pdf")
+    pdf_path = os.path.join(REPORTS_FOLDER, pdf_name)
+    with open(pdf_path, "wb") as f:
+        f.write(pdf_bytes)
+
+    return send_from_directory(REPORTS_FOLDER, pdf_name, as_attachment=True)
+
+
+# -----------------------------------
+# List uploaded files (JSON)
 # -----------------------------------
 @app.route("/files", methods=["GET"])
 def list_files():
@@ -394,9 +412,7 @@ def list_files():
 # Main entry
 # -----------------------------------
 if __name__ == "__main__":
-    # Local dev entry. Use PORT env var if present so local testing with containers/Render work the same.
-    # Keep debug off by default; enable by setting FLASK_ENV=development in your environment.
     port = int(os.environ.get("PORT", 5000))
     debug_mode = os.environ.get("FLASK_ENV", "").lower() == "development"
     app.run(host="0.0.0.0", port=port, debug=debug_mode)
-
+# To run: python app.py

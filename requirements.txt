@@ -8,3 +8,6 @@ xlrd
 python-dateutil
 gunicorn
 chardet
+rapidfuzz
+thefuzz
+weasyprint

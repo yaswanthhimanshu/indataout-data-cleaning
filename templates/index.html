@@ -130,13 +130,39 @@
                   <label class="adv-item"><input type="checkbox" name="handle_outliers" value="1"> Handle outliers
                     <div class="adv-desc">Detect and cap extreme numeric values.</div>
                   </label>
+
+                  <!-- Added: Missing strategy (includes KNN) -->
                   <label class="adv-item">Missing strategy:
                     <select name="missing_strategy">
                       <option value="fill" selected>Fill (recommended)</option>
                       <option value="drop">Drop rows</option>
+                      <option value="knn">KNN Imputation (numeric)</option>
                     </select>
-                    <div class="adv-desc">Decide how to handle missing data.</div>
+                    <div class="adv-desc">Decide how to handle missing data. KNN estimates numeric values using nearby rows.</div>
                   </label>
+
+                  <!-- Added: K for KNN -->
+                  <label class="adv-item">K for KNN:
+                    <input type="number" name="knn_k" value="5" min="1" max="50" style="width:80px">
+                    <div class="adv-desc">Neighbors for KNNImputer (only used when Missing strategy = KNN).</div>
+                  </label>
+
+                  <!-- Added: Fuzzy Matching options -->
+                  <label class="adv-item"><input type="checkbox" name="enable_fuzzy" value="1"> Enable fuzzy text clustering
+                    <div class="adv-desc">Automatically merge similar text values (typos, abbreviations).</div>
+                  </label>
+
+                  <label class="adv-item">Fuzzy threshold:
+                    <input type="number" name="fuzzy_threshold" value="88" min="60" max="100" style="width:80px">
+                    <div class="adv-desc">Similarity threshold (0–100). Higher = stricter matching.</div>
+                  </label>
+
+                  <label class="adv-item">Columns to fuzzy (optional):
+                    <input type="text" name="fuzzy_columns" placeholder="e.g. country,city">
+                    <div class="adv-desc">Comma-separated list of columns to restrict fuzzy merging. Leave blank for all text columns.</div>
+                  </label>
+
+                  <!-- Original fill numeric block -->
                   <label class="adv-item">Fill numeric:
                     <select name="fill_numeric">
                       <option value="mean" selected>Mean</option>
@@ -199,6 +225,7 @@
         <div class="download-row">
           <a class="choose-btn" href="{{ url_for('download_cleaned', filename=cleaned.cleaned_filename) }}">⬇️ Download Cleaned CSV</a>
           <a class="choose-btn secondary" href="{{ url_for('download_report', filename=cleaned.report_filename) }}">📄 Download Report</a>
+          <a class="choose-btn secondary" href="{{ url_for('download_report_pdf', filename=cleaned.report_filename) }}">📄 Download PDF Report</a>
           <a class="choose-btn neutral" href="{{ url_for('index') }}">Upload Another File</a>
         </div>
       </section>
