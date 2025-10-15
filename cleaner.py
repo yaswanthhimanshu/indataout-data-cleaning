@@ -249,12 +249,27 @@ def clean_dataframe(
         if fuzzy_ops:
             report["operations"].append({"action": "fuzzy_cluster", "details": fuzzy_ops})
 
-    # 4) Drop empty columns
+    # 4) Drop empty columns (track names + count for the report)
     if opts["drop_empty_columns"]:
         empty_cols = [c for c in working.columns if working[c].isna().all()]
         if empty_cols:
+            # drop them from the working dataframe
             working.drop(columns=empty_cols, inplace=True)
-            report["operations"].append({"action": "drop_empty_columns", "columns_dropped": empty_cols, "count": len(empty_cols)})
+            # record operation (existing)
+            report["operations"].append({
+                "action": "drop_empty_columns",
+                "columns_dropped": empty_cols,
+                "count": len(empty_cols)
+            })
+            # also expose friendly top-level report fields used by templates
+            report["empty_columns_removed"] = int(len(empty_cols))
+            report["empty_columns"] = list(empty_cols)
+        else:
+            # explicitly set zero/empty list so template logic is reliable
+            report["empty_columns_removed"] = 0
+            report["empty_columns"] = []
+
+    
 
     # 5) Drop constant columns
     if opts["drop_constant_columns"]:
@@ -401,6 +416,12 @@ def clean_dataframe(
     report["outliers_removed"] = int(outliers_removed_total)
     report["filled_cells"] = int(filled_cells)
     report["columns_renamed"] = len(renamed_map) if renamed_map else 0
+    # ensure empty_columns keys exist for templates even if drop_empty_columns was False
+    if "empty_columns_removed" not in report:
+        report["empty_columns_removed"] = 0
+    if "empty_columns" not in report:
+        report["empty_columns"] = []
+
 
     PREVIEW_ROWS = min(len(working), 1000)
     preview = working.head(PREVIEW_ROWS).copy()

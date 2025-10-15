@@ -26,13 +26,6 @@ import pandas as pd
 # Import your cleaning helpers (assumes cleaner.py exists and exports these)
 from cleaner import analyze_dataframe, clean_dataframe, save_report
 
-# PDF generation (optional feature)
-try:
-    from weasyprint import HTML
-    HAS_PDF = True
-except Exception:
-    HAS_PDF = False
-
 # Optional encoding detector
 try:
     import chardet
@@ -360,35 +353,6 @@ def download_report(filename):
         flash("File not found.")
         return redirect(url_for("index"))
     return send_from_directory(REPORTS_FOLDER, safe, as_attachment=True)
-
-
-# -----------------------------------
-# Download cleaning report (PDF)
-# -----------------------------------
-@app.route("/download/report_pdf/<path:filename>")
-def download_report_pdf(filename):
-    if not HAS_PDF:
-        flash("PDF generation not available (WeasyPrint not installed).")
-        return redirect(url_for("index"))
-
-    safe = secure_filename(filename)
-    full_json = os.path.join(REPORTS_FOLDER, safe)
-    if not os.path.exists(full_json):
-        flash("Report file not found.")
-        return redirect(url_for("index"))
-
-    import json
-    with open(full_json, "r", encoding="utf-8") as f:
-        report_data = json.load(f)
-
-    html_out = render_template("report_pdf.html", report=report_data, filename=safe)
-    pdf_bytes = HTML(string=html_out).write_pdf()
-    pdf_name = safe.replace(".json", ".pdf")
-    pdf_path = os.path.join(REPORTS_FOLDER, pdf_name)
-    with open(pdf_path, "wb") as f:
-        f.write(pdf_bytes)
-
-    return send_from_directory(REPORTS_FOLDER, pdf_name, as_attachment=True)
 
 
 # -----------------------------------
