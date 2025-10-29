@@ -63,6 +63,123 @@ def _iqr_outliers_mask(series: pd.Series, multiplier: float = 1.5) -> pd.Series:
     high = q3 + multiplier * iqr
     return (series < low) | (series > high)
 
+# -------------------------
+# Data Quality Scoring Helper
+# -------------------------
+def data_quality_score(df: pd.DataFrame) -> float:
+    """
+    Compute a simple Data Quality Score (0–100).
+    Based on missing %, duplicates %, outliers %, and constant column %.
+    """
+    if df.empty:
+        return 0.0
+
+    n_rows, n_cols = df.shape
+    total_cells = n_rows * n_cols
+
+    # Missing values
+    missing_pct = (df.isna().sum().sum() / total_cells) * 100 if total_cells else 0
+
+    # Duplicates
+    dup_pct = (df.duplicated().sum() / n_rows) * 100 if n_rows else 0
+
+    # Constant columns
+    const_col_pct = (df.nunique(dropna=False) <= 1).sum() / n_cols * 100
+
+    # Outliers (numeric columns only)
+    num_df = df.select_dtypes(include=np.number)
+    outlier_pct = 0
+    if not num_df.empty:
+        z = np.abs((num_df - num_df.mean()) / num_df.std(ddof=0))
+        outlier_pct = (z > 3).sum().sum() / (num_df.size) * 100
+
+    # Weighted score (you can tune weights)
+    dq = 100 - (0.5 * missing_pct + 0.2 * dup_pct + 0.2 * outlier_pct + 0.1 * const_col_pct)
+    dq = max(0, min(100, dq))
+    return round(dq, 2)
+
+
+
+# -------------------------
+# Data type conversion helper
+# -------------------------
+def convert_dtypes(df: pd.DataFrame, dtype_map: Optional[Dict[str, str]] = None):
+    """
+    dtype_map: optional mapping {col_name: 'auto'|'string'|'numeric'|'datetime'|'category'|'bool'}
+    If dtype_map is None, 'auto' behavior is attempted for all columns.
+    Returns (df_converted, meta)
+    meta: {col: {'from': old_dtype, 'to': chosen, 'coerced': n, 'success': bool}}
+    """
+    df = df.copy()
+    meta: Dict[str, Dict[str, Any]] = {}
+    cols = list(df.columns)
+
+    # default: all auto
+    if dtype_map is None:
+        dtype_map = {c: "auto" for c in cols}
+
+    def _to_numeric_safe(s: pd.Series):
+        conv = pd.to_numeric(s, errors="coerce")
+        coerced = int(s.notna().sum() - conv.notna().sum()) if s.notna().any() else 0
+        return conv, coerced
+
+    def _to_datetime_safe(s: pd.Series):
+        conv = pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
+        coerced = int(s.notna().sum() - conv.notna().sum()) if s.notna().any() else 0
+        return conv, coerced
+
+    for c in cols:
+        choice = dtype_map.get(c, "auto")
+        old_dtype = str(df[c].dtype)
+        info = {"from": old_dtype, "to": choice, "coerced": 0, "success": True}
+        try:
+            if choice == "auto":
+                # prefer numeric if mostly numeric, else datetime if mostly datetime, else keep string
+                conv_num, coerced_num = _to_numeric_safe(df[c])
+                frac_num = conv_num.notna().sum() / max(1, len(df[c]))
+                if frac_num >= 0.9:
+                    df[c] = conv_num
+                    info.update({"to": "numeric", "coerced": int(coerced_num)})
+                else:
+                    conv_dt, coerced_dt = _to_datetime_safe(df[c])
+                    frac_dt = conv_dt.notna().sum() / max(1, len(df[c]))
+                    if frac_dt >= 0.9:
+                        df[c] = conv_dt
+                        info.update({"to": "datetime", "coerced": int(coerced_dt)})
+                    else:
+                        # leave as-string/object
+                        df[c] = df[c].astype(object)
+                        info.update({"to": "string", "coerced": 0})
+            elif choice == "numeric":
+                conv, coerced = _to_numeric_safe(df[c])
+                df[c] = conv
+                info.update({"to": "numeric", "coerced": int(coerced)})
+            elif choice == "datetime":
+                conv, coerced = _to_datetime_safe(df[c])
+                df[c] = conv
+                info.update({"to": "datetime", "coerced": int(coerced)})
+            elif choice == "string":
+                df[c] = df[c].astype(object)
+                info.update({"to": "string"})
+            elif choice == "category":
+                df[c] = df[c].astype("category")
+                info.update({"to": "category"})
+            elif choice == "bool":
+                mapped = df[c].map({
+                    'true': True, 'True': True, 'TRUE': True,
+                    'false': False, 'False': False, 'FALSE': False,
+                    'yes': True, 'no': False, 'y': True, 'n': False, '1': True, '0': False
+                }).where(df[c].notna(), df[c])
+                df[c] = mapped.astype("boolean")
+                info.update({"to": "bool"})
+            else:
+                info.update({"success": False, "note": "unknown_choice"})
+        except Exception as e:
+            info.update({"success": False, "note": str(e)})
+        meta[c] = info
+
+    return df, meta
+
 
 # Helper: fuzzy text clustering (used for grouping similar string values)
 def _build_text_clusters(unique_vals, scorer, threshold=85):
@@ -111,6 +228,62 @@ def fuzzy_cluster_column(df, col, threshold=85):
             final_map[m] = best
     df[col] = df[col].apply(lambda x: final_map.get(str(x), x) if pd.notna(x) else x)
     return df, {"column": col, "merged_groups": len(clusters), "unique_after": df[col].nunique()}
+
+# -------------------------
+# Fill Categorical Helper
+# -------------------------
+def fill_categorical(
+    df: pd.DataFrame,
+    strategy: str = "mode",
+    constant: Optional[str] = None,
+    columns: Optional[List[str]] = None,
+    knn_neighbors: int = 5
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Fill missing values in categorical/text columns.
+    Supported strategies: 'mode', 'constant', 'drop', 'knn'
+    """
+    df = df.copy()
+    meta = {"strategy": strategy, "filled_cells": 0, "details": {}}
+
+    if columns:
+        cat_cols = [c for c in columns if c in df.columns]
+    else:
+        cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+
+    if not cat_cols:
+        return df, meta
+
+    if strategy == "drop":
+        before = len(df)
+        df = df.dropna(subset=cat_cols)
+        meta["rows_dropped"] = before - len(df)
+        return df, meta
+
+    elif strategy == "constant":
+        fill_val = constant if constant else "Unknown"
+        for c in cat_cols:
+            missing_before = df[c].isna().sum()
+            df[c] = df[c].fillna(fill_val)
+            meta["details"][c] = {"method": "constant", "filled": int(missing_before)}
+            meta["filled_cells"] += int(missing_before)
+        return df, meta
+
+    elif strategy == "mode":
+        for c in cat_cols:
+            try:
+                mode_val = df[c].mode(dropna=True).iloc[0]
+            except Exception:
+                mode_val = "Unknown"
+            missing_before = df[c].isna().sum()
+            df[c] = df[c].fillna(mode_val)
+            meta["details"][c] = {"method": "mode", "filled": int(missing_before), "value": str(mode_val)}
+            meta["filled_cells"] += int(missing_before)
+        return df, meta
+
+    else:
+        return df, meta
+
 
 
 # -------------------------
@@ -192,6 +365,15 @@ def clean_dataframe(
     }
 
     working = df.copy(deep=True)
+        # --- auto data type conversion (uses options dtype_map if provided, else auto-detect)
+    try:
+        dtype_map = options.get("dtype_map", None)
+        working, dtype_meta = convert_dtypes(working, dtype_map=dtype_map)
+        if dtype_meta:
+            report.setdefault("operations", []).append({"action": "convert_dtypes", "changes": dtype_meta})
+    except Exception as e:
+        report.setdefault("operations", []).append({"action": "convert_dtypes_failed", "error": str(e)})
+
 
     # 1) Trim whitespace & unify case for strings
     if opts["trim_whitespace"]:
@@ -373,24 +555,22 @@ def clean_dataframe(
             if before_na > 0:
                 working[c].fillna(val, inplace=True)
                 filled_cells += before_na
-        obj_cols = working.select_dtypes(include=["object", "category"]).columns.tolist()
-        for c in obj_cols:
-            strategy = opts["fill_categorical"]
-            if strategy == "mode":
-                try:
-                    val = working[c].mode(dropna=True).iloc[0]
-                except Exception:
-                    val = ""
-            elif strategy == "constant":
-                val = ""
-            else:
-                val = strategy
-            before_na = working[c].isna().sum()
-            if before_na > 0:
-                working[c].fillna(val, inplace=True)
-                filled_cells += before_na
-        if filled_cells > 0:
-            report["operations"].append({"action": "fill_missing", "filled_cells": int(filled_cells)})
+       # Handle categorical missing values (new helper)
+        working, cat_meta = fill_categorical(
+            working,
+            strategy=opts["fill_categorical"],
+            constant=options.get("categorical_constant", None),
+            columns=options.get("categorical_columns", None),
+            knn_neighbors=opts["knn_k"]
+        )
+        filled_cells += cat_meta.get("filled_cells", 0)
+        report["operations"].append({
+            "action": "fill_categorical",
+            "strategy": cat_meta["strategy"],
+            "filled_cells": cat_meta["filled_cells"],
+            "details": cat_meta.get("details", {})
+        })
+
 
     # 9) Encode categoricals
     encoded_columns = []

@@ -24,7 +24,7 @@ from werkzeug.utils import secure_filename
 import pandas as pd
 
 # Import your cleaning helpers (assumes cleaner.py exists and exports these)
-from cleaner import analyze_dataframe, clean_dataframe, save_report
+from cleaner import analyze_dataframe, clean_dataframe, save_report, data_quality_score
 
 # Optional encoding detector
 try:
@@ -259,6 +259,8 @@ def clean():
         logging.exception("Failed to read dataset for cleaning")
         flash(f"Failed to read dataset: {e}")
         return redirect(url_for("index"))
+    dq_before = data_quality_score(df)
+
 
     def _bool_from_form(name, default=True):
         val = request.form.get(name)
@@ -291,6 +293,16 @@ def clean():
         logging.exception("Invalid advanced option")
         flash(f"Invalid advanced option: {e}")
         return redirect(url_for("index"))
+    # --- Manual datatype mapping (from form fields like dtype_map[column_name]) ---
+    dtype_map = {}
+    for key, val in request.form.items():
+        if key.startswith("dtype_map[") and key.endswith("]"):
+            col_name = key[len("dtype_map["):-1]
+            if val:
+                dtype_map[col_name] = val
+    if dtype_map:
+        opts["dtype_map"] = dtype_map
+
 
     try:
         cleaned_df, report = clean_dataframe(df, options=opts)
@@ -298,6 +310,11 @@ def clean():
         logging.exception("Error during cleaning")
         flash(f"Error during cleaning: {e}")
         return redirect(url_for("index"))
+    # --- Data Quality Score (Before & After) ---
+    dq_after = data_quality_score(cleaned_df)
+    report["data_quality_before"] = dq_before
+    report["data_quality_after"] = dq_after
+    report["dq_improvement"] = round(dq_after - dq_before, 2)
 
     cleaned_basename = f"cleaned_{filename.rsplit('.', 1)[0]}.csv"
     cleaned_path = os.path.join(CLEANED_FOLDER, cleaned_basename)
@@ -379,4 +396,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     debug_mode = os.environ.get("FLASK_ENV", "").lower() == "development"
     app.run(host="0.0.0.0", port=port, debug=debug_mode)
-# To run: python app.py

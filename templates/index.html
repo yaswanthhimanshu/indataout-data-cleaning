@@ -11,7 +11,7 @@
   <header class="topbar">
     <div class="container header-grid">
       <div class="brand">
-        <div class="logo">🔶</div>
+        <div class="logo">🧹</div>
         <div class="brand-text">
           <div class="title">inDataOut</div>
           <div class="subtitle">Automate your data cleaning — fast &amp; safe</div>
@@ -70,28 +70,36 @@
       </div>
     </section>
 
-    <!-- FEATURES -->
-    <section id="features" class="container-section">
-      <h2 class="section-title">What this tool does</h2>
-      <div class="cards compact-cards features">
-        <div class="card feature-card">
-          <div class="card-title">Automatic Cleaning</div>
-          <div class="card-val">Trims spaces, fills missing values, and normalizes data types.</div>
-        </div>
-        <div class="card feature-card">
-          <div class="card-title">Duplicate Removal</div>
-          <div class="card-val">Easily detects and removes duplicates.</div>
-        </div>
-        <div class="card feature-card">
-          <div class="card-title">Quick Preview</div>
-          <div class="card-val">View dataset shape and sample before cleaning.</div>
-        </div>
-        <div class="card feature-card">
-          <div class="card-title">Safe &amp; Local</div>
-          <div class="card-val">Processed locally on your server — no data storage.</div>
-        </div>
-      </div>
-    </section>
+<!-- FEATURES -->
+<section id="features" class="container-section">
+  <h2 class="section-title">What this tool does</h2>
+  <div class="cards compact-cards features">
+    <div class="card feature-card">
+      <div class="card-title">Automatic & Manual Cleaning</div>
+      <div class="card-val">Fixes missing values, trims spaces, and lets you manually convert column data types.</div>
+    </div>
+    <div class="card feature-card">
+      <div class="card-title">Categorical Filling</div>
+      <div class="card-val">Automatically fills missing categorical (text) values using Mode or Constant strategy.</div>
+    </div>
+    <div class="card feature-card">
+      <div class="card-title">Data Quality Insights</div>
+      <div class="card-val">Shows data quality score before and after cleaning — see how much your data improved.</div>
+    </div>
+    <div class="card feature-card">
+      <div class="card-title">Duplicate & Outlier Handling</div>
+      <div class="card-val">Removes duplicate rows and caps or removes outliers safely.</div>
+    </div>
+    <div class="card feature-card">
+      <div class="card-title">Quick Preview & Download</div>
+      <div class="card-val">View dataset summary and download cleaned files instantly.</div>
+    </div>
+    <div class="card feature-card">
+      <div class="card-title">Safe & Local</div>
+      <div class="card-val">Runs securely on your server — no external data storage.</div>
+    </div>
+  </div>
+</section>
 
     {% if analysis %}
       <!-- ANALYSIS SECTION -->
@@ -162,7 +170,7 @@
                     <div class="adv-desc">Comma-separated list of columns to restrict fuzzy merging. Leave blank for all text columns.</div>
                   </label>
 
-                  <!-- Original fill numeric block -->
+                  <!-- fill numeric block -->
                   <label class="adv-item">Fill numeric:
                     <select name="fill_numeric">
                       <option value="mean" selected>Mean</option>
@@ -171,6 +179,42 @@
                     </select>
                     <div class="adv-desc">Strategy for filling numeric missing values.</div>
                   </label>
+
+                  <!--  Fill categorical -->
+                  <label class="adv-item">Fill categorical:
+                    <select name="fill_categorical">
+                      <option value="mode" selected>Mode</option>
+                      <option value="constant">Constant (blank)</option>
+                    </select>
+                    <div class="adv-desc">Strategy for filling missing categorical values.</div>
+                  </label>
+
+                  <!-- Manual datatype selection -->
+                  <div class="adv-item" style="flex:1 1 100%;margin-top:8px;">
+                    <h4 style="margin-top:6px;margin-bottom:6px;">Detected Column Types — Select Conversion</h4>
+                    <div class="dtype-grid" style="max-height:260px;overflow:auto;padding:6px;border:1px solid #eee;border-radius:6px;">
+                      {% if analysis and analysis.dtypes %}
+                        {% for col, dtype in analysis.dtypes.items() %}
+                          <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                            <div style="min-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ col }}</div>
+                            <select name="dtype_map[{{ col }}]" style="min-width:150px;">
+                              <option value="auto" selected>Auto</option>
+                              <option value="numeric">Numeric</option>
+                              <option value="datetime">Datetime</option>
+                              <option value="string">String</option>
+                              <option value="category">Category</option>
+                              <option value="bool">Boolean</option>
+                            </select>
+                          </label>
+                        {% endfor %}
+                      {% else %}
+                        <div class="hint small">Column types will appear here after upload.</div>
+                      {% endif %}
+                    </div>
+                    <div class="hint" style="margin-top:6px;">Select a type for each column. “Auto” lets the system detect automatically.</div>
+                  </div>
+                  <!-- /Manual datatype selection -->
+
                 </div>
                 <div class="hint">Options apply when you click <strong>Clean Data</strong>.</div>
               </div>
@@ -223,7 +267,47 @@
           <div><strong>Columns renamed:</strong> {{ cleaned.report.columns_renamed }}</div>
           <div><strong>Empty columns removed:</strong> {{ cleaned.report.empty_columns|length if cleaned.report.empty_columns is defined else 0 }}</div>
         </div>
-        <div class="download-row">
+
+        <!-- Data Quality Score card -->
+        <div class="dq-card" aria-live="polite" style="margin:12px 0 14px;padding:12px;border-radius:10px;background:#fff;border:1px solid rgba(0,0,0,0.05);box-shadow:0 6px 18px rgba(0,0,0,0.03);">
+          <div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;">
+            <div style="min-width:110px;">
+              <div style="font-size:12px;color:var(--muted);">Before</div>
+              <div style="font-weight:700;font-size:18px;">{{ cleaned.report.data_quality_before if cleaned.report.data_quality_before is not none else 'N/A' }}</div>
+            </div>
+
+            <div style="min-width:110px;">
+              <div style="font-size:12px;color:var(--muted);">After</div>
+              <div style="font-weight:700;font-size:18px;">{{ cleaned.report.data_quality_after if cleaned.report.data_quality_after is not none else 'N/A' }}</div>
+            </div>
+
+            <div style="min-width:150px;">
+              <div style="font-size:12px;color:var(--muted);">Improvement</div>
+              <div class="dq-improvement" data-dq="{{ cleaned.report.dq_improvement if cleaned.report.dq_improvement is not none else '' }}" style="font-weight:700;font-size:16px;">
+                {% if cleaned.report.dq_improvement is not none %}
+                  {% if cleaned.report.dq_improvement >= 0 %}+{{ cleaned.report.dq_improvement }}{% else %}{{ cleaned.report.dq_improvement }}{% endif %}
+                {% else %}N/A{% endif %}
+              </div>
+            </div>
+
+            <div style="flex:1;min-width:220px;">
+              <div style="font-size:12px;color:var(--muted);margin-bottom:6px;">Overall quality (after)</div>
+              <div class="dq-progress-outer" aria-hidden="true" style="background:#f1f5f9;border-radius:999px;height:12px;overflow:hidden;">
+                <div class="dq-progress-bar" data-after="{{ cleaned.report.data_quality_after if cleaned.report.data_quality_after is not none else 0 }}" style="height:100%;width:0%;transition:width 700ms ease;background:linear-gradient(90deg,#10b981,#06b6d4);"></div>
+              </div>
+            </div>
+          </div>
+
+          <div style="margin-top:8px;font-size:13px;color:#444;padding-top:8px;">
+            {% if cleaned.report.data_quality_before is not none and cleaned.report.data_quality_after is not none %}
+              Quality improved by <strong>{{ cleaned.report.dq_improvement }}</strong> points.
+            {% else %}
+              Data Quality Score not available for this run.
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="download-row" style="margin-top:8px;">
           <a class="choose-btn" href="{{ url_for('download_cleaned', filename=cleaned.cleaned_filename) }}">⬇️ Download Cleaned CSV</a>
           <a class="choose-btn secondary" href="{{ url_for('download_report', filename=cleaned.report_filename) }}">📄 Download Report</a>
           <a class="choose-btn neutral" href="{{ url_for('index') }}">Upload Another File</a>
@@ -237,5 +321,33 @@
   </footer>
 
   <script src="{{ url_for('static', filename='script.js') }}"></script>
+  <script>
+    // small UI script: animate dq bar and color improvement
+    document.addEventListener('DOMContentLoaded', function () {
+      try {
+        const dqEl = document.querySelector('.dq-improvement');
+        const bar = document.querySelector('.dq-progress-bar');
+        if (dqEl) {
+          const raw = dqEl.getAttribute('data-dq');
+          const val = raw === '' ? null : Number(raw);
+          if (val === null || Number.isNaN(val)) {
+            dqEl.style.color = '#666';
+          } else if (val > 0) {
+            dqEl.style.color = '#16a34a';
+          } else if (val === 0) {
+            dqEl.style.color = '#666';
+          } else {
+            dqEl.style.color = '#dc2626';
+          }
+        }
+        if (bar) {
+          const w = Number(bar.getAttribute('data-after') || 0);
+          setTimeout(() => { bar.style.width = Math.max(0, Math.min(100, w)) + '%'; }, 80);
+        }
+      } catch (e) {
+        console.debug('dq-ui error', e);
+      }
+    });
+  </script>
 </body>
 </html>

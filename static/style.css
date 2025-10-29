@@ -87,3 +87,9 @@ body{margin:0;background:linear-gradient(180deg,#fff,var(--bg));color:#121212;-w
   .clean-grid{grid-template-columns:1fr;}
   .hero-title{font-size:22px;}
 }
+/* Data Quality & Dtype selector polish */
+.dq-card strong { font-weight:700; }
+.dq-progress-outer { background:#f1f5f9; border-radius:999px; height:12px; overflow:hidden; }
+.dq-progress-bar { height:100%; width:0%; transition:width 0.8s ease; background:linear-gradient(90deg,#10b981,#06b6d4); }
+.dtype-grid select { border:1px solid #ddd; border-radius:6px; padding:4px; font-size:13px; }
+.dtype-grid label:hover { background:#fafafa; }
