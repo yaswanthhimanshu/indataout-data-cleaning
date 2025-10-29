@@ -1,6 +1,7 @@
-# 🧹 inDataOut — Data Cleaning Web App
+# 🧹 inDataOut — Advanced Data Cleaning Web App
 
-A simple and smart **Flask-based data cleaning tool** that lets you upload, clean, and download datasets instantly — all in the browser.
+A powerful yet simple **Flask-based web app** that lets you upload, clean, analyze, and download datasets instantly — all inside your browser.  
+Perfect for **data preprocessing, cleaning, and quality improvement**.
 
 🌐 **Live App:** [https://indataout-data-cleaning.onrender.com](https://indataout-data-cleaning.onrender.com)
 
@@ -8,14 +9,17 @@ A simple and smart **Flask-based data cleaning tool** that lets you upload, clea
 
 ## 🚀 Features
 
-- 📂 Supports multiple file formats: **CSV, XLSX, XLS, JSON, TSV, TXT**
-- 🧽 One-click automatic data cleaning  
-- ⚙️ Advanced cleaning options for full control  
-- 📊 Handles missing data, duplicates, and formatting issues  
-- 🧠 Includes **KNN Imputation** and **Fuzzy Text Clustering**  
-- 📉 Instant download of cleaned dataset (CSV) and JSON report  
-- ⚡ Fast, reliable & optimized using **Flask + Pandas**  
-- ☁️ Hosted seamlessly on **Render** with **Gunicorn**
+- 📂 Supports **CSV, Excel (XLSX/XLS), JSON, TSV, TXT** formats  
+- ⚙️ One-click **Automatic & Manual Data Cleaning**  
+- 🧽 Removes duplicates, outliers, empty & constant columns  
+- 🔢 **Fill Numeric** (Mean / Median / Zero)  
+- 🔤 **Fill Categorical** (Mode / Constant)  
+- 🧠 **KNN Imputation** for smart numeric filling  
+- 🧩 **Manual Data Type Conversion** (select type for each column)  
+- 🔍 **Fuzzy Text Clustering** (merges similar strings / typos)  
+- 📈 **Data Quality Score Dashboard** (before vs after cleaning)  
+- 📊 Download **cleaned dataset (CSV)** & **cleaning report (JSON)**  
+- ⚡ Built for speed using **Flask + Pandas**, hosted on **Render**
 
 ---
 
@@ -28,13 +32,27 @@ A simple and smart **Flask-based data cleaning tool** that lets you upload, clea
 | ✅ **Drop constant columns** | Remove columns that contain one repeated value |
 | ✅ **Trim whitespace** | Remove spaces around text values |
 | ✅ **Convert data types** | Convert numeric/date-like text to proper types |
-| ⬜ **Handle outliers** | Detect and cap extreme numeric values |
-| 🔧 **Missing strategy** | Decide how to handle missing data (`Fill`, `Drop`, or `KNN`) |
-| 🔢 **Fill numeric** | Choose strategy for numeric data (`Mean`, `Median`, `Zero`) |
-| 🧠 **KNN Imputation** | Estimate numeric missing values using nearest neighbors |
-| 🔍 **Fuzzy text clustering** | Automatically merge similar text values (typos, abbreviations) |
+| 🔄 **Manual data type conversion** | Choose datatype for each column manually |
+| 🔢 **Fill numeric** | Fill missing numeric values (Mean / Median / Zero) |
+| 🔤 **Fill categorical** | Fill missing text values (Mode / Constant) |
+| 🔧 **Missing strategy** | Choose between `Fill`, `Drop`, or `KNN` |
+| 📉 **Handle outliers** | Detect and cap or remove extreme values |
+| 🧠 **KNN Imputation** | Estimate numeric values using nearest rows |
+| 🔍 **Fuzzy text clustering** | Merge similar text values (typos, abbreviations) |
+| 💯 **Data Quality Score** | See before/after quality improvement instantly |
 
-*(All options are applied when you click **Clean Data** in the app.)*
+---
+
+## 🧠 Example Workflow
+
+1. Upload your dataset (`.csv`, `.xlsx`, `.xls`, `.json`, `.tsv`, `.txt`)  
+2. Review detected columns and select datatypes (optional)  
+3. Pick advanced options like KNN, Fuzzy Matching, Fill Strategy  
+4. Click **Clean Data**  
+5. Instantly view:
+   - Cleaned data preview  
+   - Data Quality Score (Before vs After)  
+   - Download links for CSV + JSON report  
 
 ---
 
@@ -42,21 +60,25 @@ A simple and smart **Flask-based data cleaning tool** that lets you upload, clea
 
 - **Backend:** Flask (Python)  
 - **Libraries:** Pandas, NumPy, Scikit-learn, OpenPyXL, Chardet  
+- **Frontend:** HTML, CSS, Vanilla JS  
 - **Server:** Gunicorn  
 - **Hosting:** Render  
-- **Frontend:** HTML + CSS (Bootstrap)
 
 ---
 
-## 🧠 Example Workflow
+## 📊 Data Quality Metrics
 
-1. Upload your file (`.csv`, `.xlsx`, `.xls`, `.json`, `.tsv`, `.txt`)  
-2. Choose desired cleaning options  
-3. Click **Clean Data**  
-4. Download the cleaned dataset instantly  
+| Metric | Description |
+|--------|--------------|
+| **Before Score** | Measures initial dataset quality |
+| **After Score** | Evaluates quality after cleaning |
+| **Improvement** | % increase in overall data consistency |
 
 ---
 
-**Developer:** Yaswanth Himanshu  
-🌐 GitHub: [https://github.com/YaswanthHimanshu](https://github.com/YaswanthHimanshu)  
-💻 App: [https://indataout-data-cleaning.onrender.com](https://indataout-data-cleaning.onrender.com)
+## 👨‍💻 Developer
+
+**Yaswanth Himanshu**  
+📘 GitHub: [https://github.com/YaswanthHimanshu](https://github.com/YaswanthHimanshu)  
+🌐 Live App: [https://indataout-data-cleaning.onrender.com](https://indataout-data-cleaning.onrender.com)
+
