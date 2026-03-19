@@ -15,7 +15,7 @@ Perfect for **data preprocessing, cleaning, and quality improvement**.
 - 🔢 **Smart Numeric Handling**: Fill missing values (Mean / Median / Zero)
 - 🔤 **Categorical Data Treatment**: Fill missing text values (Mode / Constant)
 - 🧩 **Manual Data Type Conversion**: Select specific type for each column (Auto, Numeric, Datetime, String, Category, Boolean)
-- 📉 **Interactive Outlier Detection**: Preview and manually select outlier rows for removal using IQR method
+- 📉 **Interactive Outlier Detection**: Preview detected outliers (IQR method) and manually select which rows to remove
 - 📈 **Data Quality Score Dashboard**: Visual comparison before vs after cleaning with improvement metrics
 - 📊 Download **cleaned dataset (CSV)** & **detailed cleaning report (JSON)**
 - 🔒 **Privacy-Focused**: Files processed temporarily and deleted automatically after download
@@ -35,8 +35,7 @@ Perfect for **data preprocessing, cleaning, and quality improvement**.
 7. **Constant Column Removal**: Removes columns with single repeated value
 8. **Duplicate Row Removal**: Eliminates identical rows
 9. **Outlier Handling**: 
-   - **Manual Selection**: Interactive preview to choose which outlier rows to remove
-   - **Automatic IQR Method**: Optional automatic removal or clipping using IQR multiplier
+   - **Manual Selection**: Preview detected outliers (IQR method) and choose which rows to remove
 10. **Missing Value Treatment**:
     - **Numeric**: Mean, Median, or Zero imputation
     - **Categorical**: Mode or Constant filling
@@ -55,7 +54,7 @@ Perfect for **data preprocessing, cleaning, and quality improvement**.
 | 🔢 **Fill numeric** | Fill missing numeric values: Mean, Median, or Zero |
 | 🔤 **Fill categorical** | Fill missing text values: Mode or Constant (blank) |
 | 🔧 **Missing strategy** | Choose between `Fill` (recommended) or `Drop rows` |
-| 📉 **Preview Outliers** | Interactive outlier detection using IQR method - manually select rows to remove |
+| 📉 **Preview Outliers** | Detect outliers using IQR method and manually select which rows to remove |
 | 💯 **Data Quality Score** | Visual dashboard showing quality improvement (Before → After) |
 
 ---
