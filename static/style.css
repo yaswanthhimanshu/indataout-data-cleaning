@@ -94,3 +94,39 @@ body{margin:0;background:linear-gradient(180deg,#fff,var(--bg));color:#121212;-w
 .dq-progress-bar { height:100%; width:0%; transition:width 0.8s ease; background:linear-gradient(90deg,#10b981,#06b6d4); }
 .dtype-grid select { border:1px solid #ddd; border-radius:6px; padding:4px; font-size:13px; }
 .dtype-grid label:hover { background:#fafafa; }
+
+/* Features section */
+.container-section { padding:24px 0; }
+.compact-cards { gap:12px; }
+.feature-card { width:320px; min-height:90px; }
+.feature-card .card-title { font-weight:700; font-size:14px; color:#222; margin-bottom:6px; }
+.feature-card .card-val { font-size:13px; color:var(--muted); font-weight:400; }
+
+/* Outlier preview table */
+#outlierPreviewSection {
+    border: 1px solid #eee;
+    border-radius: 10px;
+    padding: 14px;
+    background: #fafafa;
+}
+#outlierPreviewSection h5 {
+    margin-top: 0;
+    margin-bottom: 8px;
+    font-size: 14px;
+    font-weight: 700;
+}
+#outlierTableBody tr:nth-child(even) {
+    background-color: #f9f9f9;
+}
+#outlierTableBody td, #outlierTableBody th {
+    padding: 6px 8px;
+    font-size: 12px;
+}
+.outlier-checkbox {
+    margin-right: 6px;
+}
+#outlierCountInfo {
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--muted);
+}

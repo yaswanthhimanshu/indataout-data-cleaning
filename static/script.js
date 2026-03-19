@@ -94,5 +94,113 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     });
   }
+
+  // Outlier preview functionality
+  const previewOutliersBtn = document.getElementById('previewOutliersBtn');
+  const outlierPreviewSection = document.getElementById('outlierPreviewSection');
+  const outlierTableBody = document.getElementById('outlierTableBody');
+  const selectAllOutliers = document.getElementById('selectAllOutliers');
+  const removeSelectedOutliersBtn = document.getElementById('removeSelectedOutliersBtn');
+  const outlierCountInfo = document.getElementById('outlierCountInfo');
+
+  if (previewOutliersBtn) {
+    previewOutliersBtn.addEventListener('click', async () => {
+      const filename = document.querySelector('input[name="filename"]').value;
+      if (!filename) {
+        alert('Please upload a file first');
+        return;
+      }
+
+      try {
+        const formData = new FormData();
+        formData.append('filename', filename);
+        formData.append('multiplier', '1.5'); // Default IQR multiplier
+
+        const response = await fetch('/preview_outliers', {
+          method: 'POST',
+          body: formData
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+          // Show the outlier preview section
+          outlierPreviewSection.style.display = 'block';
+          
+          // Populate the table with outlier data
+          outlierTableBody.innerHTML = '';
+          
+          data.outliers.outlier_rows.forEach(row => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td><input type="checkbox" class="outlier-checkbox" data-row="${row.row_position}" data-position="${row.row_position}"></td>
+              <td>${row.row_position}</td>
+              <td>${row.column}</td>
+              <td>${row.value !== null ? row.value : 'N/A'}</td>
+            `;
+            outlierTableBody.appendChild(tr);
+          });
+          
+          // Update count info
+          outlierCountInfo.textContent = 
+            `Showing ${data.outliers.outlier_rows.length} of ${data.outliers.total_count} total outliers. Select rows to remove.`;
+          
+          // Add event listener for select all
+          selectAllOutliers.addEventListener('change', function() {
+            const checkboxes = document.querySelectorAll('.outlier-checkbox');
+            checkboxes.forEach(checkbox => checkbox.checked = this.checked);
+            
+            // Update the selected rows in the form immediately
+            updateSelectedOutlierRows();
+          });
+          
+          // Add event listener for individual checkboxes
+          document.addEventListener('change', function(e) {
+            if (e.target.classList.contains('outlier-checkbox')) {
+              updateSelectedOutlierRows();
+            }
+          });
+          
+          // Function to update selected outlier rows in the form
+          function updateSelectedOutlierRows() {
+            const selectedCheckboxes = document.querySelectorAll('.outlier-checkbox:checked');
+            if (selectedCheckboxes.length > 0) {
+              const selectedRows = Array.from(selectedCheckboxes).map(checkbox => 
+                parseInt(checkbox.getAttribute('data-row'))
+              );
+              
+              // Store selected rows in a hidden input field
+              let selectedRowsInput = document.querySelector('input[name=\'selected_outlier_rows\']');
+              if (!selectedRowsInput) {
+                selectedRowsInput = document.createElement('input');
+                selectedRowsInput.type = 'hidden';
+                selectedRowsInput.name = 'selected_outlier_rows';
+                document.getElementById('cleanForm').appendChild(selectedRowsInput);
+              }
+              selectedRowsInput.value = JSON.stringify(selectedRows);
+              
+              console.log('Updated selected outlier rows in form:', selectedRows);
+            } else {
+              // If no rows selected, remove the input field if it exists
+              const existingInput = document.querySelector('input[name=\'selected_outlier_rows\']');
+              if (existingInput) {
+                existingInput.remove();
+              }
+              console.log('Removed selected outlier rows input field');
+            }
+          }
+          
+          // The main clean button will handle selected outliers via form submission handler
+        
+        } else {
+          alert('Error detecting outliers: ' + data.error);
+        }
+      } catch (error) {
+        console.error('Error:', error);
+        alert('Error detecting outliers');
+      }
+    });
+  }
+
+
 });
-// static/script.js

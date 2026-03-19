@@ -111,7 +111,7 @@
           </div>
 
           <div class="actions-row">
-            <form id="cleanForm" action="{{ url_for('clean') }}" method="post" style="margin:0">
+            <form id="cleanForm" action="{{ url_for('clean') }}" method="post" style="margin:0" onsubmit="return captureSelectedOutliers();">
               <input type="hidden" name="filename" value="{{ uploaded_filename }}">
               <button type="submit" class="choose-btn">Clean Data</button>
               <button id="advToggle" type="button" class="choose-btn secondary">Advanced Options</button>
@@ -135,39 +135,42 @@
                   <label class="adv-item"><input type="checkbox" name="convert_dtypes" value="1" checked> Convert data types
                     <div class="adv-desc">Convert numeric/date-like text to proper types.</div>
                   </label>
-                  <label class="adv-item"><input type="checkbox" name="handle_outliers" value="1"> Handle outliers
-                    <div class="adv-desc">Detect and cap extreme numeric values.</div>
+                  <label class="adv-item"><input type="checkbox" name="handle_outliers" value="1" style="display:none;"> <!-- Hidden, we'll use button instead -->
+                  <button type="button" id="previewOutliersBtn" class="choose-btn secondary" style="margin-bottom:8px;">Preview Outliers</button>
+                    <div class="adv-desc">Click to see detected outliers and select which rows to remove.</div>
                   </label>
 
-                  <!-- Added: Missing strategy (includes KNN) -->
+                  <!-- Outlier Preview Section -->
+                  <div id="outlierPreviewSection" style="display:none;margin-top:10px;">
+                    <h5>Detected Outliers</h5>
+                    <div class="hint" style="margin-bottom:8px;">Select outlier rows you want to remove</div>
+                    <div class="table-wrap">
+                      <table class="preview-table">
+                        <thead>
+                          <tr>
+                            <th><input type="checkbox" id="selectAllOutliers"> Select All</th>
+                            <th>Row Index</th>
+                            <th>Column</th>
+                            <th>Value</th>
+                          </tr>
+                        </thead>
+                        <tbody id="outlierTableBody">
+                          <!-- Outlier rows will be populated here -->
+                        </tbody>
+                      </table>
+                    </div>
+                    <div style="margin-top:8px;">
+                      <div class="hint" id="outlierCountInfo"></div>
+                    </div>
+                  </div>
+
+                  <!-- Missing strategy -->
                   <label class="adv-item">Missing strategy:
                     <select name="missing_strategy">
                       <option value="fill" selected>Fill (recommended)</option>
                       <option value="drop">Drop rows</option>
-                      <option value="knn">KNN Imputation (numeric)</option>
                     </select>
-                    <div class="adv-desc">Decide how to handle missing data. KNN estimates numeric values using nearby rows.</div>
-                  </label>
-
-                  <!-- Added: K for KNN -->
-                  <label class="adv-item">K for KNN:
-                    <input type="number" name="knn_k" value="5" min="1" max="50" style="width:80px">
-                    <div class="adv-desc">Neighbors for KNNImputer (only used when Missing strategy = KNN).</div>
-                  </label>
-
-                  <!-- Added: Fuzzy Matching options -->
-                  <label class="adv-item"><input type="checkbox" name="enable_fuzzy" value="1"> Enable fuzzy text clustering
-                    <div class="adv-desc">Automatically merge similar text values (typos, abbreviations).</div>
-                  </label>
-
-                  <label class="adv-item">Fuzzy threshold:
-                    <input type="number" name="fuzzy_threshold" value="88" min="60" max="100" style="width:80px">
-                    <div class="adv-desc">Similarity threshold (0–100). Higher = stricter matching.</div>
-                  </label>
-
-                  <label class="adv-item">Columns to fuzzy (optional):
-                    <input type="text" name="fuzzy_columns" placeholder="e.g. country,city">
-                    <div class="adv-desc">Comma-separated list of columns to restrict fuzzy merging. Leave blank for all text columns.</div>
+                    <div class="adv-desc">Decide how to handle missing data.</div>
                   </label>
 
                   <!-- fill numeric block -->
@@ -348,6 +351,42 @@
         console.debug('dq-ui error', e);
       }
     });
+    
+    // Function to capture selected outlier rows before form submission
+    function captureSelectedOutliers() {
+      const outlierPreviewSection = document.getElementById('outlierPreviewSection');
+      if (outlierPreviewSection && outlierPreviewSection.style.display !== 'none') {
+        const selectedCheckboxes = document.querySelectorAll('.outlier-checkbox:checked');
+        
+        // Remove any existing selected_outlier_rows input
+        const existingInput = document.querySelector('input[name="selected_outlier_rows"]');
+        if (existingInput) {
+          existingInput.remove();
+        }
+        
+        if (selectedCheckboxes.length > 0) {
+          const selectedRows = Array.from(selectedCheckboxes).map(checkbox => 
+            parseInt(checkbox.getAttribute('data-row'))
+          );
+          
+          // Create a hidden input to store the selected rows
+          const input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = 'selected_outlier_rows';
+          input.value = JSON.stringify(selectedRows);
+          document.getElementById('cleanForm').appendChild(input);
+          
+          console.log('Selected outlier rows added to form:', selectedRows);
+          console.log('Form now contains:', document.querySelector('input[name="selected_outlier_rows"]'));
+        } else {
+          console.log('No outlier rows selected, but will still submit form');
+          // Even if no rows selected, we should still allow form submission
+        }
+      } else {
+        console.log('Outlier preview section not visible, skipping outlier capture');
+      }
+      return true; // Allow form submission
+    }
   </script>
 </body>
 </html>

@@ -4,18 +4,8 @@ from sklearn.preprocessing import LabelEncoder
 import json
 from datetime import datetime
 from typing import Tuple, Dict, Any, List, Optional
+import logging
 
-# Added imports for advanced cleaning features
-from sklearn.impute import KNNImputer
-try:
-    from rapidfuzz import fuzz
-    _FUZZ_FUNC = lambda a, b: fuzz.ratio(a, b)
-except Exception:
-    try:
-        from thefuzz import fuzz
-        _FUZZ_FUNC = lambda a, b: fuzz.ratio(a, b)
-    except Exception:
-        _FUZZ_FUNC = None
 
 
 # -------------------------
@@ -25,9 +15,16 @@ def _is_datetime_series(s: pd.Series) -> bool:
     """Try to infer datetime series robustly."""
     if pd.api.types.is_datetime64_any_dtype(s):
         return True
-    if pd.api.types.is_string_dtype(s):
+    if pd.api.types.is_string_dtype(s) or pd.api.types.is_object_dtype(s):
+        # Only test a sample to avoid performance issues
+        non_null_series = s.dropna()
+        if len(non_null_series) == 0:
+            return False
+        
+        sample_size = min(50, max(1, int(len(non_null_series)*0.1)))  # 10% of data or max 50
+        sample = non_null_series.sample(n=sample_size, random_state=42)
         try:
-            pd.to_datetime(s.dropna().sample(min(50, max(1, int(len(s.dropna())*0.1)))), errors='raise')
+            pd.to_datetime(sample.head(10), errors='raise')  # Test first 10 values
             return True
         except Exception:
             return False
@@ -37,18 +34,65 @@ def _try_convert_numeric(series: pd.Series) -> Tuple[pd.Series, bool]:
     """Attempt to convert to numeric; return (converted_series, changed_flag)."""
     if pd.api.types.is_numeric_dtype(series):
         return series, False
-    conv = pd.to_numeric(series, errors='coerce')
-    changed = not conv.equals(series) and conv.notna().sum() > 0
-    return conv, changed
+    
+    # Only attempt conversion if series has non-null values
+    non_null_series = series.dropna()
+    if len(non_null_series) == 0:
+        return series, False
+    
+    # Sample a portion of the data for testing conversion
+    sample_size = min(10, len(non_null_series))
+    sample = non_null_series.sample(n=sample_size, random_state=42)
+    
+    # Test if conversion works on sample
+    test_conversion = pd.to_numeric(sample, errors='coerce')
+    
+    # If most values in sample converted successfully, convert the whole series
+    successful_conversions = test_conversion.notna().sum()
+    if successful_conversions / len(sample) >= 0.7:  # At least 70% success rate
+        conv = pd.to_numeric(series, errors='coerce')
+        changed = not conv.equals(series) and conv.notna().sum() > 0
+        return conv, changed
+    else:
+        return series, False
 
 def _try_convert_datetime(series: pd.Series) -> Tuple[pd.Series, bool]:
     """Attempt to convert to datetime; return (converted_series, changed_flag)."""
     if pd.api.types.is_datetime64_any_dtype(series):
         return series, False
+    
+    # NEVER convert numeric columns to datetime!
+    # Numbers like 142 get converted to 1970-01-01 00:00:00.000000142 (nanoseconds)
+    if pd.api.types.is_numeric_dtype(series):
+        return series, False
+    
     try:
-        conv = pd.to_datetime(series, errors='coerce', infer_datetime_format=True)
-        changed = conv.notna().sum() > 0 and not conv.equals(series)
-        return conv, changed
+        # Only attempt conversion if series has non-null string values
+        non_null_series = series.dropna()
+        if len(non_null_series) == 0:
+            return series, False
+        
+        # Check if values look like date strings (contain date separators)
+        sample_str = non_null_series.head(10).astype(str)
+        date_like_count = sum(1 for val in sample_str if any(sep in str(val) for sep in ['-', '/', ':']))
+        if date_like_count < len(sample_str) * 0.5:  # Less than 50% look like dates
+            return series, False
+        
+        # Sample a portion of the data for testing conversion
+        sample_size = min(10, len(non_null_series))
+        sample = non_null_series.sample(n=sample_size, random_state=42)
+        
+        # Test if conversion works on sample
+        test_conversion = pd.to_datetime(sample, errors='coerce')
+        
+        # If most values in sample converted successfully, convert the whole series
+        successful_conversions = test_conversion.notna().sum()
+        if successful_conversions / len(sample) >= 0.7:  # At least 70% success rate
+            conv = pd.to_datetime(series, errors='coerce')
+            changed = conv.notna().sum() > 0 and not conv.equals(series)
+            return conv, changed
+        else:
+            return series, False
     except Exception:
         return series, False
 
@@ -62,6 +106,63 @@ def _iqr_outliers_mask(series: pd.Series, multiplier: float = 1.5) -> pd.Series:
     low = q1 - multiplier * iqr
     high = q3 + multiplier * iqr
     return (series < low) | (series > high)
+
+
+def detect_outliers(df: pd.DataFrame, multiplier: float = 1.5, max_rows: int = 100) -> Dict[str, Any]:
+    """
+    Detect outliers in numeric columns and return details for user selection.
+    Returns a dict with:
+      - outlier_rows: list of {row_index, row_position, column, value, row_data}
+      - total_count: total number of outlier values found
+      - columns_checked: list of numeric columns checked
+    """
+    df = df.copy()
+    
+    # Create a mapping from position to original index
+    pos_to_orig_idx = {i: idx for i, idx in enumerate(df.index)}
+    
+    # First, clean numeric strings (same as in clean_dataframe)
+    placeholder_values = ['####', '#####', '######', 'N/A', 'n/a', 'NA', 'NULL', 'null', 'None', '-', '--', '?', 'NaN', 'nan']
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            # Replace placeholders with NaN
+            df[col] = df[col].apply(
+                lambda x: np.nan if (isinstance(x, str) and (x.strip() in placeholder_values or x.strip().startswith('###'))) else x
+            )
+
+    
+    # Now detect outliers in numeric columns
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    outlier_rows = []
+    seen_positions = set()  # Track by position instead of index
+    
+    for col in numeric_cols:
+        mask = _iqr_outliers_mask(df[col], multiplier=multiplier)
+        outlier_positions = df.index[mask].tolist()
+        
+        for pos in outlier_positions:
+            if pos not in seen_positions and len(outlier_rows) < max_rows:
+                # Get the original index for this position
+                original_idx = pos_to_orig_idx.get(pos, pos)
+                row_data = df.loc[pos].to_dict()
+                # Convert values to strings for JSON serialization
+                row_data_str = {k: str(v) if pd.notna(v) else '' for k, v in row_data.items()}
+                outlier_rows.append({
+                    'row_index': int(original_idx),  # Original index
+                    'row_position': int(pos),        # Position in original df
+                    'column': col,
+                    'value': float(df.loc[pos, col]) if pd.notna(df.loc[pos, col]) else None,
+                    'row_data': row_data_str
+                })
+                seen_positions.add(pos)
+    
+    return {
+        'outlier_rows': outlier_rows,
+        'total_count': len(seen_positions),
+        'columns_checked': numeric_cols,
+        'max_displayed': max_rows,
+        'index_mapping': pos_to_orig_idx  # Include mapping for debugging
+    }
 
 # -------------------------
 # Data Quality Scoring Helper
@@ -84,16 +185,26 @@ def data_quality_score(df: pd.DataFrame) -> float:
     dup_pct = (df.duplicated().sum() / n_rows) * 100 if n_rows else 0
 
     # Constant columns
-    const_col_pct = (df.nunique(dropna=False) <= 1).sum() / n_cols * 100
+    const_col_pct = (df.nunique(dropna=False) <= 1).sum() / n_cols * 100 if n_cols else 0
 
     # Outliers (numeric columns only)
     num_df = df.select_dtypes(include=np.number)
     outlier_pct = 0
     if not num_df.empty:
-        z = np.abs((num_df - num_df.mean()) / num_df.std(ddof=0))
-        outlier_pct = (z > 3).sum().sum() / (num_df.size) * 100
+        # Use IQR method for outlier detection to be more robust
+        outlier_count = 0
+        for col in num_df.columns:
+            if len(num_df[col].dropna()) > 2:  # Need at least 3 values to calculate outliers
+                Q1 = num_df[col].quantile(0.25)
+                Q3 = num_df[col].quantile(0.75)
+                IQR = Q3 - Q1
+                lower_bound = Q1 - 1.5 * IQR
+                upper_bound = Q3 + 1.5 * IQR
+                outlier_count += ((num_df[col] < lower_bound) | (num_df[col] > upper_bound)).sum()
+        outlier_pct = (outlier_count / num_df.size) * 100 if num_df.size > 0 else 0
 
     # Weighted score (you can tune weights)
+    # Lower percentages result in higher quality scores
     dq = 100 - (0.5 * missing_pct + 0.2 * dup_pct + 0.2 * outlier_pct + 0.1 * const_col_pct)
     dq = max(0, min(100, dq))
     return round(dq, 2)
@@ -119,14 +230,61 @@ def convert_dtypes(df: pd.DataFrame, dtype_map: Optional[Dict[str, str]] = None)
         dtype_map = {c: "auto" for c in cols}
 
     def _to_numeric_safe(s: pd.Series):
-        conv = pd.to_numeric(s, errors="coerce")
-        coerced = int(s.notna().sum() - conv.notna().sum()) if s.notna().any() else 0
-        return conv, coerced
+        # Only attempt conversion if series has non-null values
+        non_null_series = s.dropna()
+        if len(non_null_series) == 0:
+            return s, 0
+        
+        # Sample a portion of the data for testing conversion
+        sample_size = min(10, len(non_null_series))
+        sample = non_null_series.sample(n=sample_size, random_state=42)
+        
+        # Test if conversion works on sample
+        test_conversion = pd.to_numeric(sample, errors='coerce')
+        
+        # If most values in sample converted successfully, convert the whole series
+        successful_conversions = test_conversion.notna().sum()
+        if successful_conversions / len(sample) >= 0.95:  # At least 95% success rate
+            conv = pd.to_numeric(s, errors="coerce")
+            coerced = int(s.notna().sum() - conv.notna().sum()) if s.notna().any() else 0
+            return conv, coerced
+        else:
+            # Return original series with 0 coerced count if conversion not advisable
+            return s, 0
 
     def _to_datetime_safe(s: pd.Series):
-        conv = pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
-        coerced = int(s.notna().sum() - conv.notna().sum()) if s.notna().any() else 0
-        return conv, coerced
+        # NEVER convert numeric columns to datetime - that's the main bug!
+        # Numbers like 142 get converted to 1970-01-01 00:00:00.000000142 (nanoseconds)
+        if pd.api.types.is_numeric_dtype(s):
+            return s, 0
+        
+        # Only attempt conversion if series has non-null string values
+        non_null_series = s.dropna()
+        if len(non_null_series) == 0:
+            return s, 0
+        
+        # Check if values look like date strings (contain date separators)
+        sample = non_null_series.head(10).astype(str)
+        date_like_count = sum(1 for val in sample if any(sep in str(val) for sep in ['-', '/', ':']))
+        if date_like_count < len(sample) * 0.5:  # Less than 50% look like dates
+            return s, 0
+        
+        # Sample a portion of the data for testing conversion
+        sample_size = min(10, len(non_null_series))
+        sample = non_null_series.sample(n=sample_size, random_state=42)
+        
+        # Test if conversion works on sample
+        test_conversion = pd.to_datetime(sample, errors="coerce")
+        
+        # If most values in sample converted successfully, convert the whole series
+        successful_conversions = test_conversion.notna().sum()
+        if successful_conversions / len(sample) >= 0.7:  # At least 70% success rate
+            conv = pd.to_datetime(s, errors="coerce")
+            coerced = int(s.notna().sum() - conv.notna().sum()) if s.notna().any() else 0
+            return conv, coerced
+        else:
+            # Return original series with 0 coerced count if conversion not advisable
+            return s, 0
 
     for c in cols:
         choice = dtype_map.get(c, "auto")
@@ -134,16 +292,21 @@ def convert_dtypes(df: pd.DataFrame, dtype_map: Optional[Dict[str, str]] = None)
         info = {"from": old_dtype, "to": choice, "coerced": 0, "success": True}
         try:
             if choice == "auto":
-                # prefer numeric if mostly numeric, else datetime if mostly datetime, else keep string
+                # Prioritize: numeric > datetime > string
+                # This prevents numeric columns like duration/score from being converted to datetime
                 conv_num, coerced_num = _to_numeric_safe(df[c])
-                frac_num = conv_num.notna().sum() / max(1, len(df[c]))
-                if frac_num >= 0.9:
+                # Check if numeric conversion actually worked (data changed AND is now numeric)
+                actually_converted_num = (not conv_num.equals(df[c])) or (pd.api.types.is_numeric_dtype(conv_num) and not pd.api.types.is_numeric_dtype(df[c]))
+                
+                if actually_converted_num and coerced_num < len(df[c]):
                     df[c] = conv_num
                     info.update({"to": "numeric", "coerced": int(coerced_num)})
                 else:
+                    # Only try datetime if numeric conversion failed
                     conv_dt, coerced_dt = _to_datetime_safe(df[c])
-                    frac_dt = conv_dt.notna().sum() / max(1, len(df[c]))
-                    if frac_dt >= 0.9:
+                    actually_converted_dt = (not conv_dt.equals(df[c])) or (pd.api.types.is_datetime64_any_dtype(conv_dt) and not pd.api.types.is_datetime64_any_dtype(df[c]))
+                    
+                    if actually_converted_dt and coerced_dt < len(df[c]):
                         df[c] = conv_dt
                         info.update({"to": "datetime", "coerced": int(coerced_dt)})
                     else:
@@ -165,12 +328,21 @@ def convert_dtypes(df: pd.DataFrame, dtype_map: Optional[Dict[str, str]] = None)
                 df[c] = df[c].astype("category")
                 info.update({"to": "category"})
             elif choice == "bool":
-                mapped = df[c].map({
-                    'true': True, 'True': True, 'TRUE': True,
-                    'false': False, 'False': False, 'FALSE': False,
-                    'yes': True, 'no': False, 'y': True, 'n': False, '1': True, '0': False
-                }).where(df[c].notna(), df[c])
-                df[c] = mapped.astype("boolean")
+                # Map string/numeric values to boolean
+                bool_map = {
+                    'true': True, 'True': True, 'TRUE': True, 't': True, 'T': True,
+                    'false': False, 'False': False, 'FALSE': False, 'f': False, 'F': False,
+                    'yes': True, 'Yes': True, 'YES': True, 'y': True, 'Y': True,
+                    'no': False, 'No': False, 'NO': False, 'n': False, 'N': False,
+                    '1': True, '0': False, 1: True, 0: False,
+                    1.0: True, 0.0: False
+                }
+                # Map values and preserve NaNs
+                mapped_values = df[c].map(bool_map)
+                # Keep original NaN values
+                df[c] = mapped_values.where(df[c].notna(), np.nan)
+                # Convert to object dtype to preserve mixed types if needed
+                df[c] = df[c].astype('object')
                 info.update({"to": "bool"})
             else:
                 info.update({"success": False, "note": "unknown_choice"})
@@ -181,53 +353,7 @@ def convert_dtypes(df: pd.DataFrame, dtype_map: Optional[Dict[str, str]] = None)
     return df, meta
 
 
-# Helper: fuzzy text clustering (used for grouping similar string values)
-def _build_text_clusters(unique_vals, scorer, threshold=85):
-    """Group similar strings using fuzzy similarity."""
-    if scorer is None:
-        return {}, {}
-    remaining = set(unique_vals)
-    clusters = {}
-    mapping = {}
-    for val in sorted(unique_vals, key=lambda x: (-len(str(x)), str(x))):
-        if val not in remaining:
-            continue
-        rep = val
-        clusters[rep] = [rep]
-        remaining.remove(rep)
-        for other in list(remaining):
-            try:
-                score = scorer(str(rep), str(other))
-            except Exception:
-                score = 0
-            if score >= threshold:
-                clusters[rep].append(other)
-                mapping[other] = rep
-                remaining.remove(other)
-        mapping[rep] = rep
-    return clusters, mapping
 
-
-def fuzzy_cluster_column(df, col, threshold=85):
-    # Detect and group similar text values in object columns (fix typos, abbreviations)
-    # Uses fuzzy string similarity to merge values that are nearly identical
-    # Example: "US", "U.S.", "United States" → "United States"
-    if _FUZZ_FUNC is None or col not in df.columns:
-        return df, None
-    ser = df[col].dropna().astype(str)
-    if ser.nunique() <= 1:
-        return df, None
-    clusters, mapping = _build_text_clusters(list(ser.unique()), _FUZZ_FUNC, threshold)
-    if not mapping:
-        return df, None
-    freq = ser.value_counts().to_dict()
-    final_map = {}
-    for rep, members in clusters.items():
-        best = max(members, key=lambda v: freq.get(v, 0))
-        for m in members:
-            final_map[m] = best
-    df[col] = df[col].apply(lambda x: final_map.get(str(x), x) if pd.notna(x) else x)
-    return df, {"column": col, "merged_groups": len(clusters), "unique_after": df[col].nunique()}
 
 # -------------------------
 # Fill Categorical Helper
@@ -236,12 +362,11 @@ def fill_categorical(
     df: pd.DataFrame,
     strategy: str = "mode",
     constant: Optional[str] = None,
-    columns: Optional[List[str]] = None,
-    knn_neighbors: int = 5
+    columns: Optional[List[str]] = None
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Fill missing values in categorical/text columns.
-    Supported strategies: 'mode', 'constant', 'drop', 'knn'
+    Supported strategies: 'mode', 'constant', 'drop'
     """
     df = df.copy()
     meta = {"strategy": strategy, "filled_cells": 0, "details": {}}
@@ -353,9 +478,8 @@ def clean_dataframe(
         "handle_outliers": options.get("handle_outliers", None),
         "encode_categoricals": options.get("encode_categoricals", False),
         "drop_constant_columns": options.get("drop_constant_columns", True),
-        "enable_fuzzy": options.get("enable_fuzzy", False),
-        "fuzzy_threshold": options.get("fuzzy_threshold", 88),
-        "knn_k": int(options.get("knn_k", 5))
+
+        "selected_outlier_rows": options.get("selected_outlier_rows", [])
     }
 
     report = {
@@ -365,17 +489,45 @@ def clean_dataframe(
     }
 
     working = df.copy(deep=True)
-        # --- auto data type conversion (uses options dtype_map if provided, else auto-detect)
-    try:
-        dtype_map = options.get("dtype_map", None)
-        working, dtype_meta = convert_dtypes(working, dtype_map=dtype_map)
-        if dtype_meta:
-            report.setdefault("operations", []).append({"action": "convert_dtypes", "changes": dtype_meta})
-    except Exception as e:
-        report.setdefault("operations", []).append({"action": "convert_dtypes_failed", "error": str(e)})
+
+    # 0) Replace common placeholder values with NaN (before any other processing)
+    placeholder_values = [
+        '####', '#####', '######', '#######',  # Excel display errors
+        'N/A', 'n/a', 'NA', 'na', 'N.A.', 'n.a.',  # Common NA representations
+        'NULL', 'null', 'Null', 'None', 'none', 'NONE',  # NULL values
+        '-', '--', '---', '?', '??', '???',  # Placeholder symbols
+        'NaN', 'nan', 'NAN', '#N/A', '#NA', '#VALUE!', '#REF!', '#DIV/0!',  # Excel errors
+        'undefined', 'UNDEFINED', 'missing', 'MISSING', 'unknown', 'UNKNOWN',
+        '.', '..', '...', '*', '**', '***'  # Other placeholders
+    ]
+    for col in working.columns:
+        if working[col].dtype == 'object':
+            # Replace placeholder values with NaN
+            working[col] = working[col].apply(
+                lambda x: np.nan if (isinstance(x, str) and (x.strip() in placeholder_values or x.strip().startswith('###'))) else x
+            )
+    report["operations"].append({"action": "replace_placeholders", "values": placeholder_values[:5] + ['...']})
 
 
-    # 1) Trim whitespace & unify case for strings
+
+    # 1) Rename columns first (before other operations)
+    renamed_map = {}
+    if opts["rename_columns"]:
+        new_cols = []
+        for c in working.columns:
+            # Clean up encoding issues and normalize column names
+            nc = str(c).encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
+            nc = nc.strip().lower().replace(" ", "_")
+            # Remove any non-ASCII characters that might have encoding issues
+            nc = ''.join(ch if ord(ch) < 128 else '_' for ch in nc)
+            new_cols.append(nc)
+            if nc != c:
+                renamed_map[c] = nc
+        if renamed_map:
+            working.columns = new_cols
+            report["operations"].append({"action": "rename_columns", "renamed_map": renamed_map, "count": len(renamed_map)})
+
+    # 2) Trim whitespace & unify case for strings
     if opts["trim_whitespace"]:
         text_cols = working.select_dtypes(include=["object"]).columns.tolist()
         trimmed = 0
@@ -387,51 +539,34 @@ def clean_dataframe(
         if trimmed:
             report["operations"].append({"action": "trim_whitespace", "columns_processed": text_cols})
 
-    # 2) Rename columns
-    renamed_map = {}
-    if opts["rename_columns"]:
-        new_cols = []
-        for c in working.columns:
-            nc = c.strip().lower().replace(" ", "_")
-            new_cols.append(nc)
-            if nc != c:
-                renamed_map[c] = nc
-        if renamed_map:
-            working.columns = new_cols
-            report["operations"].append({"action": "rename_columns", "renamed_map": renamed_map, "count": len(renamed_map)})
 
-    # 3) Convert data types (numeric-like -> numeric; strings -> datetime if detected)
+
+    # 4) Convert data types (numeric-like -> numeric; strings -> datetime if detected)
     dtype_changes = []
     if opts["convert_dtypes"]:
         for c in list(working.columns):
             ser = working[c]
+            # Only convert to numeric, skip aggressive datetime conversion
+            # Datetime conversion should be explicit, not automatic
             conv_num, changed_num = _try_convert_numeric(ser)
             if changed_num:
                 working[c] = conv_num
                 dtype_changes.append({"column": c, "new_dtype": str(working[c].dtype), "reason": "numeric_conversion"})
-                continue
-            conv_dt, changed_dt = _try_convert_datetime(ser)
-            if changed_dt:
-                working[c] = conv_dt
-                dtype_changes.append({"column": c, "new_dtype": "datetime64[ns]", "reason": "datetime_parsing"})
         if dtype_changes:
             report["operations"].append({"action": "convert_dtypes", "changes": dtype_changes})
 
-    # Apply fuzzy text clustering if enabled (only affects text columns)
-    if opts["enable_fuzzy"]:
-        text_cols = working.select_dtypes(include=["object", "category"]).columns.tolist()
-        fuzzy_ops = []
-        for c in text_cols:
-            try:
-                working, info = fuzzy_cluster_column(working, c, threshold=opts["fuzzy_threshold"])
-                if info:
-                    fuzzy_ops.append(info)
-            except Exception:
-                continue
-        if fuzzy_ops:
-            report["operations"].append({"action": "fuzzy_cluster", "details": fuzzy_ops})
+    # 5) --- auto data type conversion (uses options dtype_map if provided, else auto-detect)
+    try:
+        dtype_map = options.get("dtype_map", None)
+        if dtype_map:
+            working, dtype_meta = convert_dtypes(working, dtype_map=dtype_map)
+            if dtype_meta:
+                report.setdefault("operations", []).append({"action": "manual_convert_dtypes", "changes": dtype_meta})
+    except Exception as e:
+        report.setdefault("operations", []).append({"action": "manual_convert_dtypes_failed", "error": str(e)})
 
-    # 4) Drop empty columns (track names + count for the report)
+
+    # 6) Drop empty columns (track names + count for the report)
     if opts["drop_empty_columns"]:
         empty_cols = [c for c in working.columns if working[c].isna().all()]
         if empty_cols:
@@ -453,7 +588,7 @@ def clean_dataframe(
 
     
 
-    # 5) Drop constant columns
+    # 7) Drop constant columns
     if opts["drop_constant_columns"]:
         constant_cols = []
         for c in working.columns:
@@ -463,7 +598,7 @@ def clean_dataframe(
             working.drop(columns=constant_cols, inplace=True)
             report["operations"].append({"action": "drop_constant_columns", "columns_dropped": constant_cols, "count": len(constant_cols)})
 
-    # 6) Remove duplicates
+    # 8) Remove duplicates
     duplicates_removed = 0
     if opts["remove_duplicates"]:
         before = working.shape[0]
@@ -475,8 +610,42 @@ def clean_dataframe(
         duplicates_removed = before - after
         report["operations"].append({"action": "drop_duplicates", "removed_rows": int(duplicates_removed), "subset": opts["duplicates_subset"]})
 
-    # 7) Handle outliers (IQR only for now)
+    # 9) Handle outliers (IQR only for now)
     outliers_removed_total = 0
+    
+    # Handle manually selected outlier rows BEFORE other operations that might change the dataframe structure
+    selected_outlier_rows = []
+    if 'selected_outlier_rows' in opts and opts['selected_outlier_rows']:
+        selected_outlier_rows = opts['selected_outlier_rows']
+        
+        logging.info(f"Attempting to remove selected outlier rows early: {selected_outlier_rows}")
+        logging.info(f"Working dataframe index before outlier removal: {working.index.tolist()[:10]}... (first 10)")
+        
+        # The selected_outlier_rows are now positional indices (0, 1, 2, ...) from the original uploaded file
+        # Convert positions to actual dataframe indices for removal
+        positions = [int(p) for p in selected_outlier_rows if 0 <= int(p) < len(working)]
+        
+        logging.info(f"Valid positions to remove: {positions}")
+        
+        if positions:
+            # Get the actual indices from the current working dataframe at those positions
+            actual_indices_to_remove = working.index[positions].tolist()
+            working = working.drop(actual_indices_to_remove)
+            outliers_removed_total = len(positions)
+            report["operations"].append({
+                "action": "manual_outlier_removal",
+                "method": "user_selection",
+                "rows_removed": len(positions),
+                "selected_rows": selected_outlier_rows,
+                "valid_indices_dropped": actual_indices_to_remove,
+                "selected_positions": positions
+            })
+            logging.info(f"Successfully removed {len(positions)} outlier rows early")
+        else:
+            logging.info("No valid positions found for early outlier removal")
+    
+    # Handle automatic outliers if enabled (for backward compatibility)
+    # This is independent of manual outlier handling
     if opts["handle_outliers"]:
         method = opts["handle_outliers"].get("method", "iqr")
         action = opts["handle_outliers"].get("action", "remove")
@@ -491,8 +660,9 @@ def clean_dataframe(
                 before = working.shape[0]
                 working = working.loc[~mask_any_outlier].copy()
                 after = working.shape[0]
-                outliers_removed_total = before - after
-                report["operations"].append({"action": "outlier_removal", "method": "iqr", "multiplier": multiplier, "removed_rows": int(outliers_removed_total)})
+                automatic_outliers_removed = before - after
+                outliers_removed_total += automatic_outliers_removed
+                report["operations"].append({"action": "outlier_removal", "method": "iqr", "multiplier": multiplier, "removed_rows": int(automatic_outliers_removed)})
             else:
                 for c in working.select_dtypes(include=[np.number]).columns:
                     m = _iqr_outliers_mask(working[c], multiplier=multiplier)
@@ -504,7 +674,7 @@ def clean_dataframe(
                         working[c] = working[c].clip(lower=low, upper=high)
                 report["operations"].append({"action": "outlier_clip", "method": "iqr", "multiplier": multiplier})
 
-    # 8) Handle missing values
+    # 10) Handle missing values
     filled_cells = 0
     dropped_rows = 0
     if opts["missing_strategy"] == "drop":
@@ -514,30 +684,7 @@ def clean_dataframe(
         dropped_rows = before - after
         report["operations"].append({"action": "drop_missing_rows", "rows_dropped": int(dropped_rows)})
 
-    elif opts["missing_strategy"] == "knn":
-        # Handle missing values using KNN imputation (model-based filling)
-        # Estimates missing numeric values using nearest rows (based on other features)
-        # Runs only when user selects missing_strategy = "knn"
-        num_cols = working.select_dtypes(include=[np.number]).columns.tolist()
-        if len(num_cols) > 0:
-            imputer = KNNImputer(n_neighbors=max(1, opts["knn_k"]))
-            before_na = working[num_cols].isna().sum().sum()
-            try:
-                arr = imputer.fit_transform(working[num_cols])
-                working[num_cols] = pd.DataFrame(arr, columns=num_cols, index=working.index)
-                after_na = working[num_cols].isna().sum().sum()
-                filled_cells = before_na - after_na
-                report["operations"].append({
-                    "action": "knn_impute",
-                    "columns": num_cols,
-                    "k": opts["knn_k"],
-                    "filled_cells": int(filled_cells)
-                })
-            except Exception as e:
-                report["operations"].append({
-                    "action": "knn_impute_failed",
-                    "reason": str(e)
-                })
+
 
     else:
         numeric_cols = working.select_dtypes(include=[np.number]).columns.tolist()
@@ -555,13 +702,13 @@ def clean_dataframe(
             if before_na > 0:
                 working[c].fillna(val, inplace=True)
                 filled_cells += before_na
-       # Handle categorical missing values (new helper)
+        
+        # Handle categorical missing values
         working, cat_meta = fill_categorical(
             working,
             strategy=opts["fill_categorical"],
             constant=options.get("categorical_constant", None),
-            columns=options.get("categorical_columns", None),
-            knn_neighbors=opts["knn_k"]
+            columns=options.get("categorical_columns", None)
         )
         filled_cells += cat_meta.get("filled_cells", 0)
         report["operations"].append({
@@ -572,7 +719,7 @@ def clean_dataframe(
         })
 
 
-    # 9) Encode categoricals
+    # 11) Encode categoricals
     encoded_columns = []
     if opts["encode_categoricals"] == "label":
         cat_cols = working.select_dtypes(include=["object", "category"]).columns.tolist()
@@ -601,6 +748,15 @@ def clean_dataframe(
         report["empty_columns_removed"] = 0
     if "empty_columns" not in report:
         report["empty_columns"] = []
+
+    # Final logging to indicate if any outlier removal happened
+    # Use opts.get() to check the actual options dictionary
+    if not opts.get("selected_outlier_rows") and not opts.get("handle_outliers"):
+        logging.info("No outlier removal was requested")
+    elif opts.get("selected_outlier_rows"):
+        logging.info(f"Processed manually selected outlier rows: {opts['selected_outlier_rows']}")
+    elif opts.get("handle_outliers"):
+        logging.info("Automatic outlier handling was performed")
 
 
     PREVIEW_ROWS = min(len(working), 1000)

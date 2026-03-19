@@ -8,6 +8,7 @@ Features:
 """
 
 import os
+import json
 import logging
 from io import StringIO
 from flask import (
@@ -24,7 +25,7 @@ from werkzeug.utils import secure_filename
 import pandas as pd
 
 # Import your cleaning helpers (assumes cleaner.py exists and exports these)
-from cleaner import analyze_dataframe, clean_dataframe, save_report, data_quality_score
+from cleaner import analyze_dataframe, clean_dataframe, save_report, data_quality_score, detect_outliers
 
 # Optional encoding detector
 try:
@@ -276,19 +277,28 @@ def clean():
             "trim_whitespace": _bool_from_form("trim_whitespace", True),
             "rename_columns": True,
             "convert_dtypes": _bool_from_form("convert_dtypes", True),
-            "handle_outliers": {"method": "iqr", "action": "remove", "multiplier": 1.5}
-            if _bool_from_form("handle_outliers", False)
-            else None,
+            "handle_outliers": None,  # We'll handle outliers manually now
             "encode_categoricals": "label" if _bool_from_form("encode_categoricals", False) else False,
             "missing_strategy": request.form.get("missing_strategy", "fill"),
             "fill_numeric": request.form.get("fill_numeric", "mean"),
             "fill_categorical": request.form.get("fill_categorical", "mode"),
-            # new options
-            "enable_fuzzy": _bool_from_form("enable_fuzzy", False),
-            "fuzzy_threshold": int(request.form.get("fuzzy_threshold", 88)),
-            "fuzzy_columns": [c.strip() for c in request.form.get("fuzzy_columns", "").split(",") if c.strip()] or None,
-            "knn_k": int(request.form.get("knn_k", 5)) if request.form.get("knn_k") else 5,
+
         }
+        
+        # Handle selected outlier rows
+        selected_outlier_rows_str = request.form.get('selected_outlier_rows')
+        logging.info(f"Raw selected_outlier_rows from form: {selected_outlier_rows_str}")
+        logging.info(f"All form keys: {list(request.form.keys())}")
+        if selected_outlier_rows_str:
+            try:
+                selected_outlier_rows = json.loads(selected_outlier_rows_str)
+                logging.info(f"Parsed selected_outlier_rows: {selected_outlier_rows}")
+                opts['selected_outlier_rows'] = selected_outlier_rows
+            except Exception as e:
+                logging.warning(f"Could not parse selected outlier rows: {e}")
+                opts['selected_outlier_rows'] = []
+        else:
+            opts['selected_outlier_rows'] = []
     except Exception as e:
         logging.exception("Invalid advanced option")
         flash(f"Invalid advanced option: {e}")
@@ -319,7 +329,8 @@ def clean():
     cleaned_basename = f"cleaned_{filename.rsplit('.', 1)[0]}.csv"
     cleaned_path = os.path.join(CLEANED_FOLDER, cleaned_basename)
     try:
-        cleaned_df.to_csv(cleaned_path, index=False)
+        # Save with UTF-8 encoding and no index to ensure clean output
+        cleaned_df.to_csv(cleaned_path, index=False, encoding='utf-8-sig')
     except Exception as e:
         logging.exception("Failed to save cleaned file")
         flash(f"Failed to save cleaned file: {e}")
@@ -387,6 +398,30 @@ def list_files():
     except Exception as e:
         logging.exception("Failed to list files")
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+# -----------------------------------
+# Preview outliers route
+# -----------------------------------
+@app.route('/preview_outliers', methods=['POST'])
+def preview_outliers():
+    filename = request.form.get('filename')
+    if not filename:
+        return jsonify({'error': 'No file specified'}), 400
+
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    if not os.path.exists(file_path):
+        return jsonify({'error': 'File not found'}), 400
+
+    try:
+        df = load_dataset(file_path)
+        multiplier = float(request.form.get('multiplier', 1.5))
+        
+        outliers = detect_outliers(df, multiplier=multiplier)
+        return jsonify({'success': True, 'outliers': outliers})
+    except Exception as e:
+        logging.exception('Failed to detect outliers')
+        return jsonify({'error': str(e)}), 500
 
 
 # -----------------------------------
