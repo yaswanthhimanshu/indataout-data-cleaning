@@ -10,6 +10,10 @@ Features:
 import os
 import json
 import logging
+import shutil
+import secrets
+import threading
+import time
 from io import StringIO
 from flask import (
     Flask,
@@ -38,7 +42,7 @@ except Exception:
 # Flask configuration
 # -----------------------------------
 app = Flask(__name__)
-app.secret_key = "super-secret-key"  
+app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
@@ -209,7 +213,14 @@ def upload():
         return redirect(url_for("index"))
 
     filename = secure_filename(file.filename)
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    # Every upload gets its own UUID folder — no two users ever share a path
+    from flask import session as flask_session
+    session_id = secrets.token_hex(16)
+    session_dir = os.path.join(UPLOAD_FOLDER, session_id)
+    os.makedirs(session_dir, exist_ok=True)
+    file_path = os.path.join(session_dir, filename)
+    flask_session["upload_sid"]      = session_id
+    flask_session["upload_filename"] = filename
     try:
         file.save(file_path)
     except Exception as e:
@@ -249,7 +260,13 @@ def clean():
         flash("No file specified.")
         return redirect(url_for("index"))
 
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    from flask import session as flask_session
+    sid              = flask_session.get("upload_sid")
+    session_filename = flask_session.get("upload_filename")
+    if not sid or session_filename != filename:
+        flash("Session mismatch — please re-upload your file.")
+        return redirect(url_for("index"))
+    file_path = os.path.join(UPLOAD_FOLDER, sid, filename)
     if not os.path.exists(file_path):
         flash("File not found on server.")
         return redirect(url_for("index"))
@@ -327,7 +344,11 @@ def clean():
     report["dq_improvement"] = round(dq_after - dq_before, 2)
 
     cleaned_basename = f"cleaned_{filename.rsplit('.', 1)[0]}.csv"
-    cleaned_path = os.path.join(CLEANED_FOLDER, cleaned_basename)
+    user_cleaned_dir = os.path.join(UPLOAD_FOLDER, sid, "cleaned")
+    os.makedirs(user_cleaned_dir, exist_ok=True)
+    cleaned_path = os.path.join(user_cleaned_dir, cleaned_basename)
+    flask_session["cleaned_sid"]      = sid
+    flask_session["cleaned_filename"] = cleaned_basename
     try:
         # Save with UTF-8 encoding and no index to ensure clean output
         cleaned_df.to_csv(cleaned_path, index=False, encoding='utf-8-sig')
@@ -337,7 +358,10 @@ def clean():
         return redirect(url_for("index"))
 
     report_basename = f"report_{filename.rsplit('.', 1)[0]}.json"
-    report_path = os.path.join(REPORTS_FOLDER, report_basename)
+    user_reports_dir = os.path.join(UPLOAD_FOLDER, sid, "reports")
+    os.makedirs(user_reports_dir, exist_ok=True)
+    report_path = os.path.join(user_reports_dir, report_basename)
+    flask_session["report_filename"] = report_basename
     try:
         save_report(report, report_path)
     except Exception as e:
@@ -362,12 +386,27 @@ def clean():
 # -----------------------------------
 @app.route("/download/cleaned/<path:filename>")
 def download_cleaned(filename):
-    safe = secure_filename(filename)
-    full = os.path.join(CLEANED_FOLDER, safe)
+    from flask import session as flask_session
+    safe     = secure_filename(filename)
+    sid      = flask_session.get("cleaned_sid")
+    expected = flask_session.get("cleaned_filename")
+    if not sid or expected != safe:
+        flash("Unauthorized or session expired. Please re-upload.")
+        return redirect(url_for("index"))
+    folder = os.path.join(UPLOAD_FOLDER, sid, "cleaned")
+    full   = os.path.join(folder, safe)
     if not os.path.exists(full):
         flash("File not found.")
         return redirect(url_for("index"))
-    return send_from_directory(CLEANED_FOLDER, safe, as_attachment=True)
+    # Send file then delete the entire UUID folder in background (ilovepdf style)
+    session_root = os.path.join(UPLOAD_FOLDER, sid)
+    response = send_from_directory(folder, safe, as_attachment=True)
+    def _cleanup():
+        shutil.rmtree(session_root, ignore_errors=True)
+        logging.info(f"Deleted session folder: {sid}")
+    threading.Timer(2.0, _cleanup).start()   # 2s delay lets response finish
+    flask_session.clear()
+    return response
 
 
 # -----------------------------------
@@ -375,29 +414,22 @@ def download_cleaned(filename):
 # -----------------------------------
 @app.route("/download/report/<path:filename>")
 def download_report(filename):
-    safe = secure_filename(filename)
-    full = os.path.join(REPORTS_FOLDER, safe)
+    from flask import session as flask_session
+    safe     = secure_filename(filename)
+    sid      = flask_session.get("cleaned_sid")
+    expected = flask_session.get("report_filename")
+    if not sid or expected != safe:
+        flash("Unauthorized or session expired. Please re-upload.")
+        return redirect(url_for("index"))
+    folder = os.path.join(UPLOAD_FOLDER, sid, "reports")
+    full   = os.path.join(folder, safe)
     if not os.path.exists(full):
         flash("File not found.")
         return redirect(url_for("index"))
-    return send_from_directory(REPORTS_FOLDER, safe, as_attachment=True)
+    return send_from_directory(folder, safe, as_attachment=True)
 
 
-# -----------------------------------
-# List uploaded files (JSON)
-# -----------------------------------
-@app.route("/files", methods=["GET"])
-def list_files():
-    try:
-        files = []
-        for fname in os.listdir(UPLOAD_FOLDER):
-            fpath = os.path.join(UPLOAD_FOLDER, fname)
-            if os.path.isfile(fpath):
-                files.append({"filename": fname, "size_bytes": os.path.getsize(fpath)})
-        return jsonify({"success": True, "files": files})
-    except Exception as e:
-        logging.exception("Failed to list files")
-        return jsonify({"success": False, "error": str(e)}), 500
+# /files route removed — it exposed all users' filenames publicly.
 
 
 # -----------------------------------
@@ -409,7 +441,12 @@ def preview_outliers():
     if not filename:
         return jsonify({'error': 'No file specified'}), 400
 
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    from flask import session as flask_session
+    sid              = flask_session.get("upload_sid")
+    session_filename = flask_session.get("upload_filename")
+    if not sid or session_filename != filename:
+        return jsonify({'error': 'Unauthorized'}), 403
+    file_path = os.path.join(UPLOAD_FOLDER, sid, filename)
     if not os.path.exists(file_path):
         return jsonify({'error': 'File not found'}), 400
 
@@ -422,6 +459,28 @@ def preview_outliers():
     except Exception as e:
         logging.exception('Failed to detect outliers')
         return jsonify({'error': str(e)}), 500
+
+
+# -----------------------------------
+# Background cleanup — deletes abandoned UUID folders older than 2 hours
+# Runs every hour. Handles users who upload but never download.
+# -----------------------------------
+def _periodic_cleanup():
+    while True:
+        time.sleep(3600)          # check every hour
+        now = time.time()
+        try:
+            for name in os.listdir(UPLOAD_FOLDER):
+                path = os.path.join(UPLOAD_FOLDER, name)
+                if os.path.isdir(path):
+                    age = now - os.path.getmtime(path)
+                    if age > 7200:  # older than 2 hours
+                        shutil.rmtree(path, ignore_errors=True)
+                        logging.info(f"Cleanup: removed abandoned folder {name}")
+        except Exception as e:
+            logging.warning(f"Periodic cleanup error: {e}")
+
+threading.Thread(target=_periodic_cleanup, daemon=True).start()
 
 
 # -----------------------------------
