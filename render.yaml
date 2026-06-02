@@ -9,4 +9,4 @@ services:
     autoDeploy: true
     envVars:
       - key: SECRET_KEY
-        value: "replace-this-with-a-long-random-string"
+        sync: false

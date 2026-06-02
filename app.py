@@ -14,6 +14,9 @@ import shutil
 import secrets
 import threading
 import time
+import re
+import math
+import tempfile
 from io import StringIO
 from flask import (
     Flask,
@@ -29,7 +32,7 @@ from werkzeug.utils import secure_filename
 import pandas as pd
 
 # Import your cleaning helpers (assumes cleaner.py exists and exports these)
-from cleaner import analyze_dataframe, clean_dataframe, save_report, data_quality_score, detect_outliers
+from cleaner import analyze_dataframe, clean_dataframe, save_report, data_quality_score, cleaning_completeness_score, detect_outliers
 
 # Optional encoding detector
 try:
@@ -45,13 +48,13 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
-CLEANED_FOLDER = os.path.join(UPLOAD_FOLDER, "cleaned")
-REPORTS_FOLDER = os.path.join(UPLOAD_FOLDER, "reports")
+UPLOAD_FOLDER = os.environ.get(
+    "UPLOAD_FOLDER",
+    os.path.join(tempfile.gettempdir(), "indataout_uploads"),
+)
+UPLOAD_RETENTION_SECONDS = int(os.environ.get("UPLOAD_RETENTION_SECONDS", "7200"))
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(CLEANED_FOLDER, exist_ok=True)
-os.makedirs(REPORTS_FOLDER, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {"csv", "xlsx", "xls", "json", "tsv", "txt"}
 
@@ -64,6 +67,153 @@ logging.basicConfig(level=logging.INFO)
 # -----------------------------------
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def normalized_column_name(col_name):
+    """Match cleaner.py column normalization for form fields submitted before cleaning."""
+    nc = str(col_name).encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")
+    nc = nc.strip().lower().replace(" ", "_")
+    return "".join(ch if ord(ch) < 128 else "_" for ch in nc)
+
+
+def make_json_safe(value):
+    """Convert pandas/numpy values and non-finite floats into strict JSON-safe data."""
+    if isinstance(value, dict):
+        return {str(k): make_json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [make_json_safe(v) for v in value]
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if hasattr(value, "item"):
+        try:
+            return make_json_safe(value.item())
+        except (TypeError, ValueError):
+            pass
+    return value
+
+
+def delete_original_upload(sid, filename):
+    """Delete the uploaded source file after final outputs have been generated."""
+    if not sid or not filename:
+        return
+    path = os.path.join(UPLOAD_FOLDER, sid, secure_filename(filename))
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+            logging.info(f"Deleted original uploaded file: {filename}")
+    except Exception as e:
+        logging.warning(f"Could not delete original uploaded file {filename}: {e}")
+
+
+def delete_session_folder(sid, reason="session cleanup"):
+    """Remove one upload session folder if it is inside the configured upload root."""
+    if not sid:
+        return
+    session_root = os.path.abspath(os.path.join(UPLOAD_FOLDER, str(sid)))
+    upload_root = os.path.abspath(UPLOAD_FOLDER)
+    if not session_root.startswith(upload_root + os.sep):
+        logging.warning(f"Refused to delete path outside upload root: {session_root}")
+        return
+    if os.path.isdir(session_root):
+        shutil.rmtree(session_root, ignore_errors=True)
+        logging.info(f"Deleted upload session folder ({reason}): {sid}")
+
+
+def schedule_session_cleanup(sid, reason, delay=120.0):
+    """Schedule temporary session cleanup without keeping the process alive."""
+    timer = threading.Timer(delay, lambda: delete_session_folder(sid, reason))
+    timer.daemon = True
+    timer.start()
+
+
+def parse_clean_options(form, default_enabled=True, default_missing_strategy="fill"):
+    def _bool_from_form(name, default=None):
+        if default is None:
+            default = default_enabled
+        values = form.getlist(name)
+        if not values:
+            return default
+        val = values[-1]
+        return str(val).lower() in ("1", "true", "on", "yes")
+
+    opts = {
+        "remove_duplicates": _bool_from_form("remove_duplicates"),
+        "drop_empty_columns": _bool_from_form("drop_empty_columns"),
+        "drop_constant_columns": _bool_from_form("drop_constant_columns"),
+        "trim_whitespace": _bool_from_form("trim_whitespace"),
+        "rename_columns": True,
+        "convert_dtypes": _bool_from_form("convert_dtypes"),
+        "handle_outliers": None,
+        "encode_categoricals": "label" if _bool_from_form("encode_categoricals", False) else False,
+        "missing_strategy": form.get("missing_strategy", default_missing_strategy),
+        "fill_numeric": form.get("fill_numeric", "mean"),
+        "fill_categorical": form.get("fill_categorical", "mode"),
+    }
+
+    selected_outlier_rows_str = form.get("selected_outlier_rows")
+    logging.info(f"Raw selected_outlier_rows from form: {selected_outlier_rows_str}")
+    logging.info(f"All form keys: {list(form.keys())}")
+    if selected_outlier_rows_str:
+        try:
+            opts["selected_outlier_rows"] = json.loads(selected_outlier_rows_str)
+        except Exception as e:
+            logging.warning(f"Could not parse selected outlier rows: {e}")
+            opts["selected_outlier_rows"] = []
+    else:
+        opts["selected_outlier_rows"] = []
+
+    dtype_map = {}
+    column_renames = {}
+    cell_updates = []
+    missing_cell_updates = []
+    drop_selected_columns = []
+    for key, val in form.items():
+        if key.startswith("dtype_map[") and key.endswith("]"):
+            col_name = normalized_column_name(key[len("dtype_map["):-1])
+            if val and val != "auto":
+                dtype_map[col_name] = val
+        elif key.startswith("column_rename[") and key.endswith("]") and val:
+            original_col = normalized_column_name(key[len("column_rename["):-1])
+            new_col = normalized_column_name(val)
+            if new_col and new_col != original_col:
+                column_renames[original_col] = new_col
+        elif key.startswith("cell_update["):
+            match = re.match(r"^cell_update\[([^\]]+)\]\[(.+)\]$", key)
+            if match:
+                cell_updates.append({
+                    "row_index": match.group(1),
+                    "column": normalized_column_name(match.group(2)),
+                    "value": val
+                })
+        elif key.startswith("missing_cell[") and val:
+            match = re.match(r"^missing_cell\[([^\]]+)\]\[(.+)\]$", key)
+            if match:
+                missing_cell_updates.append({
+                    "row_index": match.group(1),
+                    "column": normalized_column_name(match.group(2)),
+                    "value": val
+                })
+        elif key.startswith("drop_column[") and key.endswith("]") and val:
+            drop_selected_columns.append(normalized_column_name(key[len("drop_column["):-1]))
+    if dtype_map:
+        opts["dtype_map"] = dtype_map
+    if column_renames:
+        opts["column_renames"] = column_renames
+    if cell_updates:
+        opts["cell_updates"] = cell_updates
+    if missing_cell_updates:
+        opts["missing_cell_updates"] = missing_cell_updates
+    if drop_selected_columns:
+        opts["drop_selected_columns"] = drop_selected_columns
+
+    return opts
 
 
 def detect_encoding_with_chardet(filepath: str, n_bytes: int = 200000):
@@ -125,6 +275,8 @@ def load_dataset(filepath: str):
         try:
             if ext == ".json":
                 df = pd.read_json(filepath, encoding=enc)
+            elif sep is None:
+                df = pd.read_csv(filepath, encoding=enc, sep=None, engine="python")
             else:
                 df = pd.read_csv(filepath, encoding=enc, sep=sep)
             logging.info(f"Loaded {os.path.basename(filepath)} using encoding {enc}")
@@ -189,7 +341,7 @@ def index():
                 <input type="file" name="file">
                 <button type="submit">Upload</button>
             </form>
-            <p>Use /files to list uploads and /download/cleaned/&lt;filename&gt; or /download/report/&lt;filename&gt; to download.</p>
+            <p>Upload a CSV, Excel, JSON, TSV, or TXT file to start cleaning.</p>
             </body></html>"""
         )
 
@@ -215,6 +367,15 @@ def upload():
     filename = secure_filename(file.filename)
     # Every upload gets its own UUID folder — no two users ever share a path
     from flask import session as flask_session
+    previous_sid = flask_session.get("upload_sid")
+    if previous_sid:
+        delete_session_folder(previous_sid, "replaced by new upload")
+        flask_session.pop("upload_sid", None)
+        flask_session.pop("upload_filename", None)
+        flask_session.pop("cleaned_sid", None)
+        flask_session.pop("cleaned_filename", None)
+        flask_session.pop("report_filename", None)
+
     session_id = secrets.token_hex(16)
     session_dir = os.path.join(UPLOAD_FOLDER, session_id)
     os.makedirs(session_dir, exist_ok=True)
@@ -280,56 +441,16 @@ def clean():
     dq_before = data_quality_score(df)
 
 
-    def _bool_from_form(name, default=True):
-        val = request.form.get(name)
-        if val is None:
-            return default
-        return str(val).lower() in ("1", "true", "on", "yes")
-
     try:
-        opts = {
-            "remove_duplicates": _bool_from_form("remove_duplicates", True),
-            "drop_empty_columns": _bool_from_form("drop_empty_columns", True),
-            "drop_constant_columns": _bool_from_form("drop_constant_columns", True),
-            "trim_whitespace": _bool_from_form("trim_whitespace", True),
-            "rename_columns": True,
-            "convert_dtypes": _bool_from_form("convert_dtypes", True),
-            "handle_outliers": None,  # We'll handle outliers manually now
-            "encode_categoricals": "label" if _bool_from_form("encode_categoricals", False) else False,
-            "missing_strategy": request.form.get("missing_strategy", "fill"),
-            "fill_numeric": request.form.get("fill_numeric", "mean"),
-            "fill_categorical": request.form.get("fill_categorical", "mode"),
-
-        }
-        
-        # Handle selected outlier rows
-        selected_outlier_rows_str = request.form.get('selected_outlier_rows')
-        logging.info(f"Raw selected_outlier_rows from form: {selected_outlier_rows_str}")
-        logging.info(f"All form keys: {list(request.form.keys())}")
-        if selected_outlier_rows_str:
-            try:
-                selected_outlier_rows = json.loads(selected_outlier_rows_str)
-                logging.info(f"Parsed selected_outlier_rows: {selected_outlier_rows}")
-                opts['selected_outlier_rows'] = selected_outlier_rows
-            except Exception as e:
-                logging.warning(f"Could not parse selected outlier rows: {e}")
-                opts['selected_outlier_rows'] = []
-        else:
-            opts['selected_outlier_rows'] = []
+        opts = parse_clean_options(
+            request.form,
+            default_enabled=False,
+            default_missing_strategy="ignore",
+        )
     except Exception as e:
         logging.exception("Invalid advanced option")
         flash(f"Invalid advanced option: {e}")
         return redirect(url_for("index"))
-    # --- Manual datatype mapping (from form fields like dtype_map[column_name]) ---
-    dtype_map = {}
-    for key, val in request.form.items():
-        if key.startswith("dtype_map[") and key.endswith("]"):
-            col_name = key[len("dtype_map["):-1]
-            if val:
-                dtype_map[col_name] = val
-    if dtype_map:
-        opts["dtype_map"] = dtype_map
-
 
     try:
         cleaned_df, report = clean_dataframe(df, options=opts)
@@ -342,6 +463,8 @@ def clean():
     report["data_quality_before"] = dq_before
     report["data_quality_after"] = dq_after
     report["dq_improvement"] = round(dq_after - dq_before, 2)
+    report["cleaning_completeness_score"] = cleaning_completeness_score(report)
+    report = make_json_safe(report)
 
     cleaned_basename = f"cleaned_{filename.rsplit('.', 1)[0]}.csv"
     user_cleaned_dir = os.path.join(UPLOAD_FOLDER, sid, "cleaned")
@@ -369,6 +492,8 @@ def clean():
         flash(f"Failed to save report: {e}")
         return redirect(url_for("index"))
 
+    delete_original_upload(sid, filename)
+
     return render_template(
         "index.html",
         uploaded_filename=filename,
@@ -379,6 +504,74 @@ def clean():
             "report": report,
         },
     )
+
+
+@app.route("/preview_clean", methods=["POST"])
+def preview_clean():
+    filename = request.form.get("filename")
+    if not filename:
+        return jsonify({"error": "No file specified."}), 400
+
+    from flask import session as flask_session
+    sid = flask_session.get("upload_sid")
+    session_filename = flask_session.get("upload_filename")
+    if not sid or session_filename != filename:
+        return jsonify({"error": "Session mismatch. Please re-upload your file."}), 403
+
+    file_path = os.path.join(UPLOAD_FOLDER, sid, filename)
+    if not os.path.exists(file_path):
+        return jsonify({"error": "File not found."}), 404
+
+    try:
+        df = load_dataset(file_path)
+        scoped_preview = request.form.get("preview_scope") in ("feature", "section", "manual")
+        opts = parse_clean_options(
+            request.form,
+            default_enabled=not scoped_preview,
+            default_missing_strategy="ignore" if scoped_preview else "fill",
+        )
+        cleaned_df, report = clean_dataframe(df, options=opts)
+        dq_before = data_quality_score(df)
+        dq_after = data_quality_score(cleaned_df)
+        report["data_quality_before"] = dq_before
+        report["data_quality_after"] = dq_after
+        report["dq_improvement"] = round(dq_after - dq_before, 2)
+        report["cleaning_completeness_score"] = cleaning_completeness_score(report)
+        missing_by_column_remaining = []
+        missing_counts = cleaned_df.isna().sum()
+        for col, count in missing_counts.items():
+            count = int(count)
+            if count > 0:
+                missing_by_column_remaining.append({
+                    "column": col,
+                    "missing": count,
+                    "percent": round((count / len(cleaned_df)) * 100, 2) if len(cleaned_df) else 0,
+                })
+        payload = {
+            "success": True,
+            "preview": report.get("preview", []),
+            "report": report,
+            "summary": {
+                "rows_before": int(report["original_shape"][0]),
+                "rows_after": int(report["rows_after"]),
+                "cols_after": int(report["cleaned_shape"][1]),
+                "filled_cells": int(report["filled_cells"]),
+                "duplicates_removed": int(report["duplicates_removed"]),
+                "outliers_removed": int(report["outliers_removed"]),
+                "empty_columns_removed": int(report["empty_columns_removed"]),
+                "quality_before": dq_before,
+                "quality_after": dq_after,
+                "quality_delta": round(dq_after - dq_before, 2),
+                "cleaning_completeness": report["cleaning_completeness_score"],
+                "missing_remaining": int(cleaned_df.isna().sum().sum()),
+                "missing_rows_remaining": int(cleaned_df.isna().any(axis=1).sum()),
+                "missing_by_column_remaining": missing_by_column_remaining,
+            }
+        }
+        return jsonify(make_json_safe(payload))
+    except Exception as e:
+        logging.exception("Live preview failed")
+        return jsonify({"error": str(e)}), 500
 
 
 # -----------------------------------
@@ -398,14 +591,9 @@ def download_cleaned(filename):
     if not os.path.exists(full):
         flash("File not found.")
         return redirect(url_for("index"))
-    # Send file then delete the entire UUID folder in background (ilovepdf style)
-    session_root = os.path.join(UPLOAD_FOLDER, sid)
+    # Keep both download buttons usable, then let the temporary session expire shortly after.
     response = send_from_directory(folder, safe, as_attachment=True)
-    def _cleanup():
-        shutil.rmtree(session_root, ignore_errors=True)
-        logging.info(f"Deleted session folder: {sid}")
-    threading.Timer(2.0, _cleanup).start()   # 2s delay lets response finish
-    flask_session.clear()
+    schedule_session_cleanup(sid, "post-download cleanup")
     return response
 
 
@@ -426,7 +614,9 @@ def download_report(filename):
     if not os.path.exists(full):
         flash("File not found.")
         return redirect(url_for("index"))
-    return send_from_directory(folder, safe, as_attachment=True)
+    response = send_from_directory(folder, safe, as_attachment=True)
+    schedule_session_cleanup(sid, "post-report-download cleanup")
+    return response
 
 
 # /files route removed — it exposed all users' filenames publicly.
@@ -452,6 +642,14 @@ def preview_outliers():
 
     try:
         df = load_dataset(file_path)
+        if request.form.get("preview_scope"):
+            opts = parse_clean_options(
+                request.form,
+                default_enabled=False,
+                default_missing_strategy="ignore",
+            )
+            opts["selected_outlier_rows"] = []
+            df, _ = clean_dataframe(df, options=opts)
         multiplier = float(request.form.get('multiplier', 1.5))
         
         outliers = detect_outliers(df, multiplier=multiplier)
@@ -465,21 +663,28 @@ def preview_outliers():
 # Background cleanup — deletes abandoned UUID folders older than 2 hours
 # Runs every hour. Handles users who upload but never download.
 # -----------------------------------
+def cleanup_abandoned_uploads():
+    now = time.time()
+    try:
+        for name in os.listdir(UPLOAD_FOLDER):
+            if name == "__pycache__":
+                continue
+            path = os.path.join(UPLOAD_FOLDER, name)
+            if os.path.isdir(path):
+                age = now - os.path.getmtime(path)
+                if age > UPLOAD_RETENTION_SECONDS:
+                    shutil.rmtree(path, ignore_errors=True)
+                    logging.info(f"Cleanup: removed abandoned upload folder {name}")
+    except Exception as e:
+        logging.warning(f"Upload cleanup error: {e}")
+
+
 def _periodic_cleanup():
     while True:
-        time.sleep(3600)          # check every hour
-        now = time.time()
-        try:
-            for name in os.listdir(UPLOAD_FOLDER):
-                path = os.path.join(UPLOAD_FOLDER, name)
-                if os.path.isdir(path):
-                    age = now - os.path.getmtime(path)
-                    if age > 7200:  # older than 2 hours
-                        shutil.rmtree(path, ignore_errors=True)
-                        logging.info(f"Cleanup: removed abandoned folder {name}")
-        except Exception as e:
-            logging.warning(f"Periodic cleanup error: {e}")
+        time.sleep(600)
+        cleanup_abandoned_uploads()
 
+cleanup_abandoned_uploads()
 threading.Thread(target=_periodic_cleanup, daemon=True).start()
 
 

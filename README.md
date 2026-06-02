@@ -1,260 +1,328 @@
-# 🧹 inDataOut — Advanced Data Cleaning Web App
+# inDataOut - Controlled Data Cleaning Workflow
 
-A powerful yet simple **Flask-based web app** that lets you upload, clean, analyze, and download datasets instantly — all inside your browser.  
-Perfect for **data preprocessing, cleaning, and quality improvement**.
+Live project: https://indataout-data-cleaning.onrender.com
 
-🌐 **Live App:** [https://indataout-data-cleaning.onrender.com](https://indataout-data-cleaning.onrender.com)
+inDataOut is a controlled data-cleaning workflow that helps users inspect, correct, and validate messy datasets before analysis or modeling.
 
----
-
-## 🚀 Features
-
-- 📂 Supports **CSV, Excel (XLSX/XLS), JSON, TSV, TXT** formats with robust encoding detection (UTF-8, Latin1, CP1252, Chardet)
-- ⚙️ **Automatic & Manual Data Cleaning** with customizable options
-- 🧽 **Data Preprocessing**: Removes duplicates, outliers, empty & constant columns
-- 🔢 **Smart Numeric Handling**: Fill missing values (Mean / Median / Zero)
-- 🔤 **Categorical Data Treatment**: Fill missing text values (Mode / Constant)
-- 🧩 **Manual Data Type Conversion**: Select specific type for each column (Auto, Numeric, Datetime, String, Category, Boolean)
-- 📉 **Interactive Outlier Detection**: Preview detected outliers (IQR method) and manually select which rows to remove
-- 📈 **Data Quality Score Dashboard**: Visual comparison before vs after cleaning with improvement metrics
-- 📊 Download **cleaned dataset (CSV)** & **detailed cleaning report (JSON)**
-- 🔒 **Privacy-Focused**: Files processed temporarily and deleted automatically after download
-- ⚡ Built with **Flask + Pandas**, optimized for performance, deployed on **Render**
+I built this project because data cleaning is usually either too automatic or too manual. Fully automatic tools can over-clean data without showing what changed, while spreadsheet-only cleaning becomes hard to track as the dataset grows. inDataOut is designed to keep the user in control: every important cleaning decision can be reviewed, applied, logged, and undone before creating the final cleaned file.
 
 ---
 
-## 🧩 Cleaning Operations
+## What I Built
 
-### Automatic Cleaning Steps
-1. **Replace Placeholder Values**: Converts common placeholders (N/A, NULL, NaN, etc.) to proper missing values
-2. **Column Name Sanitization**: Cleans and normalizes column names (lowercase, underscores, removes special characters)
-3. **Whitespace Trimming**: Removes leading/trailing spaces from text values
-4. **Data Type Conversion**: Automatically detects and converts numeric columns
-5. **Manual Type Mapping**: User-specified data type conversion for each column
-6. **Empty Column Removal**: Drops columns with only missing values
-7. **Constant Column Removal**: Removes columns with single repeated value
-8. **Duplicate Row Removal**: Eliminates identical rows
-9. **Outlier Handling**: 
-   - **Manual Selection**: Preview detected outliers (IQR method) and choose which rows to remove
-10. **Missing Value Treatment**:
-    - **Numeric**: Mean, Median, or Zero imputation
-    - **Categorical**: Mode or Constant filling
-11. **Label Encoding**: Optional encoding of categorical variables
+I built an interactive preprocessing workflow for messy tabular data. The workflow is delivered through a browser interface, but the main focus is the cleaning logic, user control, and validation process.
 
-### Advanced Options
+The workflow has three main dataset views:
 
-| Option | Description |
-|--------|--------------|
-| ✅ **Remove duplicates** | Delete identical rows |
-| ✅ **Drop empty columns** | Remove columns with only missing values |
-| ✅ **Drop constant columns** | Remove columns that contain one repeated value |
-| ✅ **Trim whitespace** | Remove spaces around text values |
-| ✅ **Convert data types** | Auto-detect numeric/date-like text and convert to proper types |
-| 🎯 **Manual data type conversion** | Choose datatype for each column: Auto, Numeric, Datetime, String, Category, Boolean |
-| 🔢 **Fill numeric** | Fill missing numeric values: Mean, Median, or Zero |
-| 🔤 **Fill categorical** | Fill missing text values: Mode or Constant (blank) |
-| 🔧 **Missing strategy** | Choose between `Fill` (recommended) or `Drop rows` |
-| 📉 **Preview Outliers** | Detect outliers using IQR method and manually select which rows to remove |
-| 💯 **Data Quality Score** | Visual dashboard showing quality improvement (Before → After) |
+- **Original Uploaded Dataset**: shows the untouched uploaded file.
+- **Dataset Editor**: lets the user manually edit visible cells and column names.
+- **Cleaning Work Progress**: shows the live working dataset after applied cleaning actions.
+
+The main idea is that users should always understand what changed, why it changed, and whether the cleaned result still needs review.
 
 ---
 
-## 📊 Data Quality Score
+## Why I Built It
 
-The app computes a comprehensive **Data Quality Score (0-100)** based on:
-- **Missing Values Percentage**: Proportion of empty cells
-- **Duplicates Percentage**: Proportion of duplicate rows
-- **Outliers Percentage**: Proportion of extreme values (IQR method)
-- **Constant Columns Percentage**: Proportion of non-informative columns
+Most beginner data-cleaning workflows have a few problems:
 
-**Weighted Formula**: `Score = 100 - (0.5×missing% + 0.2×dup% + 0.2×outlier% + 0.1×constant%)`
+- Users select cleaning options but cannot clearly see what changed.
+- Missing values may be filled without explaining which cells were affected.
+- Rows or columns can be removed without enough context.
+- A final "cleaned" score can look perfect even when the dataset still has review risks.
+- Users may accidentally apply options they did not mean to apply.
 
-### Quality Metrics Displayed
-| Metric | Description |
-|--------|--------------|
-| **Before Score** | Initial dataset quality score |
-| **After Score** | Quality score after cleaning operations |
-| **Improvement** | Point increase in quality score |
-| **Visual Progress Bar** | Graphical representation of final quality percentage |
+This project solves those problems by making data cleaning visible and controlled. Users apply one feature or section at a time, then check the live progress dataset, the operation log, and the generated Pandas-style code before finalizing.
 
 ---
 
-## 🧠 Example Workflow
+## Core Workflow
 
-1. **Upload Dataset** (`.csv`, `.xlsx`, `.xls`, `.json`, `.tsv`, `.txt`)
-   - Drag-and-drop or click to browse
-   - Automatic encoding detection for problematic files
-2. **Review Dataset Summary**
-   - Rows × Columns count
-   - Missing values count and percentage
-   - Duplicate row count
-   - Empty columns identified
-   - Interactive data preview table
-3. **Configure Cleaning Options** (Optional)
-   - Toggle "Advanced Options" panel
-   - Select data type for each column (Auto/Numeric/Datetime/String/Category/Boolean)
-   - Choose outlier handling: Click "Preview Outliers" to interactively select rows
-   - Set missing value strategies (numeric and categorical)
-4. **Execute Cleaning**
-   - Click "Clean Data" button
-   - System applies all selected operations sequentially
-5. **Review Results**
-   - **Cleaning Summary**: Rows processed, duplicates/outliers removed, filled cells, renamed columns
-   - **Data Quality Dashboard**: Before/After scores with visual progress bar and improvement percentage
-   - **Download Options**: 
-     - ⬇️ Cleaned CSV (UTF-8 encoded, no index)
-     - 📄 Detailed JSON Report (timestamp, operations log, preview data)
+1. **Upload a dataset**
+   - Supports CSV, Excel, JSON, TSV, and TXT files.
+   - Handles common encoding issues so messy CSV files can still load correctly.
 
----
+2. **Review the original data**
+   - The original uploaded preview stays unchanged.
+   - This gives the user a safe reference point while cleaning.
 
-## 🛠️ Tech Stack
+3. **Choose a cleaning section**
+   - Data Integrity
+   - Missing Values
+   - Data Types
+   - Outliers
+   - Advanced Options
 
-### Backend
-- **Framework**: Flask (Python web framework)
-- **Data Processing**: Pandas, NumPy
-- **Machine Learning**: Scikit-learn (LabelEncoder)
-- **File Handling**: OpenPYXL (Excel), xlrd (legacy Excel), Chardet (encoding detection)
-- **Production Server**: Gunicorn WSGI server
+4. **Apply selected actions**
+   - Each feature has an Apply button.
+   - Options must be turned on or selected before applying.
+   - If the user clicks Apply without selecting the needed option, the workflow shows a toast warning.
 
-### Frontend
-- **Structure**: HTML5 with Jinja2 templating
-- **Styling**: Custom CSS3 with gradients, shadows, responsive design
-- **Interactivity**: Vanilla JavaScript (ES6+ with async/await)
-- **Features**: Drag-and-drop upload, dynamic form updates, AJAX outlier preview
+5. **Watch Cleaning Work Progress**
+   - The live working dataset updates after every Apply.
+   - Changed cells are highlighted.
+   - The log explains exactly what was changed, filled, removed, or skipped.
+   - Undo restores the previous preview and removes highlights.
 
-### Infrastructure
-- **Hosting**: Render Cloud Platform
-- **Process Management**: Procfile for production deployment
-- **Configuration**: Environment variables for port and debug mode
+6. **Finalize**
+   - Clean Data uses the applied controls, not random toggles left on the page.
+   - The user downloads a cleaned CSV and a JSON cleaning report.
 
 ---
 
-## 🔧 Installation & Local Development
+## Data Cleaning Features Implemented
 
-### Prerequisites
-- Python 3.8 or higher
-- pip (Python package manager)
+### 1. Original Dataset Preview
 
-### Setup Steps
+The original dataset preview shows the uploaded file before cleaning. I kept this separate from the cleaning preview so users can compare the original data with the working version.
 
-1. **Clone the Repository**
-```bash
-git clone <repository-url>
-cd indataout-DATA-CLEANING
-```
+Why it matters:
 
-2. **Create Virtual Environment** (recommended)
-```bash
-python -m venv venv
-# Windows
-venv\Scripts\activate
-# Linux/Mac
-source venv/bin/activate
-```
-
-3. **Install Dependencies**
-```bash
-pip install -r requirements.txt
-```
-
-4. **Run the Application**
-```bash
-python app.py
-```
-
-The app will start on `http://localhost:5000` (or use `PORT` environment variable if set).
-
-### Environment Variables (Optional)
-- `PORT`: Override default port 5000
-- `FLASK_ENV`: Set to `development` to enable debug mode
+- Prevents confusion between original and cleaned data.
+- Helps users verify that the workflow is not silently changing the source view.
+- Gives a stable reference while applying multiple cleaning actions.
 
 ---
 
-## 📁 Project Structure
+### 2. Dataset Editor
 
-```
-indataout - DATA CLEANING/
-├── app.py                  # Main Flask application
-├── cleaner.py              # Data cleaning logic and helpers
-├── requirements.txt        # Python dependencies
-├── Procfile               # Deployment configuration
-├── render.yaml            # Render platform config
-├── templates/
-│   └── index.html         # Main UI template
-├── static/
-│   ├── style.css          # Custom styles
-│   └── script.js          # Client-side interactions
-└── uploads/               # Temporary file storage (auto-created)
-    ├── cleaned/           # Processed CSV files
-    └── reports/           # JSON cleaning reports
-```
+The Dataset Editor lets users manually edit visible cells and column names. It also includes search controls for finding values by text, column, or row number.
+
+Why it matters:
+
+- Some data issues cannot be fixed automatically, such as spelling mistakes, wrong values, or domain-specific errors.
+- Users need a way to manually correct visible problems before applying automated cleaning.
+- Column names should be editable because messy headers are common in real datasets.
 
 ---
 
-## 📋 API Endpoints
+### 3. Missing Value Editor
 
-| Route | Method | Description |
-|-------|--------|-------------|
-| `/` | GET | Home page with upload interface |
-| `/upload` | POST | Handle file upload and display analysis |
-| `/clean` | POST | Execute cleaning pipeline with options |
-| `/download/cleaned/<filename>` | GET | Download cleaned CSV file |
-| `/download/report/<filename>` | GET | Download JSON cleaning report |
-| `/files` | GET | List all uploaded files (JSON response) |
-| `/preview_outliers` | POST | Detect and return outlier information (JSON) |
+The Missing Value Editor shows rows that contain missing values and lets users type values directly into blank cells before applying fill or drop rules.
 
----
+Why it matters:
 
-## 🎨 UI Components
+- Some missing values should be manually entered instead of filled with mean, median, mode, or "Unknown".
+- Users can decide which missing values deserve exact replacement.
+- The editor updates after Apply so stale missing cells do not keep showing after the working dataset changes.
 
-### Header
-- Sticky topbar with logo and branding
-- Quick navigation CTA button
+Important behavior:
 
-### Hero Section
-- Upload card with drag-and-drop zone
-- File type indicators and size limits
-- Privacy assurance message
-
-### Features Grid
-- Six feature cards highlighting core capabilities
-- Responsive layout for mobile/tablet/desktop
-
-### Analysis Panel
-- Dataset summary statistics cards
-- Interactive data preview table (up to 1000 rows)
-- Collapsible advanced options panel
-- Real-time outlier preview with checkbox selection
-
-### Results Section
-- Cleaning operation summary grid
-- Data Quality Score dashboard with animated progress bar
-- Download buttons for CSV and JSON report
-- "Upload Another" reset option
+- Fully empty columns cannot be filled with mean or median because there are no values to calculate from.
+- The workflow reports those cases honestly instead of pretending they were filled.
+- For fully empty columns, the recommended action is to drop the column before filling remaining missing values.
 
 ---
 
-## 🔒 Security & Privacy
+### 4. Cleaning Work Progress
 
-- **Secure File Handling**: Werkzeug secure_filename for sanitization
-- **Temporary Storage**: Files stored only during session
-- **Automatic Cleanup**: No permanent data retention
-- **Encoding Robustness**: Multiple fallback encodings prevent crashes
-- **Error Handling**: Comprehensive logging and user-friendly error messages
+Cleaning Work Progress is the live spreadsheet that updates after each applied action.
+
+Implemented behavior:
+
+- Shows the current working dataset.
+- Highlights updated cells.
+- Updates after each Apply.
+- Syncs with the Dataset Editor and Missing Value Editor.
+- Supports Undo for the previous preview state.
+
+Why it matters:
+
+- Users can see cleaning results before final download.
+- Highlighting makes changed cells easier to notice.
+- Undo reduces fear of trying a cleaning option.
 
 ---
 
-## 🐛 Known Limitations
+### 5. Apply-First Cleaning Decisions
 
-- Maximum file size depends on hosting platform (typically 100MB on Render)
-- Outlier preview limited to first 100 detected rows for performance
-- Some Excel features (formulas, formatting) not preserved in CSV output
-- Very large datasets (>50k rows) may experience slower processing
+The workflow uses Apply buttons for individual features and sections. Final Clean Data uses the applied options rather than every visible form control.
+
+Why it matters:
+
+- Users may turn on a toggle while exploring but forget to turn it off.
+- Without an Apply-first workflow, final cleaning could run actions the user did not intentionally confirm.
+- This design keeps the cleaning decision deliberate and user-controlled.
 
 ---
 
-## 👨‍💻 Developer
+### 6. Data Integrity Tools
 
-**Yaswanth Himanshu**  
-📘 GitHub: [https://github.com/YaswanthHimanshu](https://github.com/YaswanthHimanshu)  
-🌐 Live App: [https://indataout-data-cleaning.onrender.com](https://indataout-data-cleaning.onrender.com)
+Implemented data integrity features:
+
+- Remove duplicate rows.
+- Drop fully empty columns.
+- Review unnamed columns.
+- Drop constant columns.
+- Trim whitespace.
+
+Why it matters:
+
+- Duplicate rows can affect counts and averages.
+- Fully empty columns add no information.
+- Constant columns do not help analysis or modeling.
+- Whitespace can cause false mismatches during filtering, grouping, or joining.
+
+Important distinction:
+
+- A fully empty column is not treated as a constant column.
+- Empty columns and constant columns are handled separately because they mean different things.
+
+---
+
+### 7. Missing Value Handling
+
+Implemented missing-value features:
+
+- Manual missing-cell entry.
+- Fill numeric values with mean, median, or zero.
+- Fill text/category values with mode or Unknown.
+- Drop rows with remaining missing values.
+
+Why it matters:
+
+- Different columns need different missing-value strategies.
+- Filling with mean is not always correct.
+- Dropping rows can remove useful data, so the user should decide deliberately.
+- The workflow logs what was filled, skipped, or left remaining.
+
+---
+
+### 8. Data Type Conversion
+
+Implemented data type tools:
+
+- Auto-convert safe numeric-looking columns.
+- Manually convert selected columns to numeric, datetime, string, category, or boolean.
+- Report conversion results and coercion behavior.
+
+Why it matters:
+
+- Messy datasets often store numbers as text.
+- Manual override is needed when automatic detection is wrong.
+- Invalid conversions can create missing values, so the workflow reports what happened instead of hiding it.
+
+---
+
+### 9. Outlier Preview And Removal
+
+The workflow detects potential outliers using the IQR method and lets the user select which detected rows to remove.
+
+Why it matters:
+
+- Outliers are not always bad data.
+- Automatically removing all outliers can over-clean a dataset.
+- Users should preview outlier rows and choose what to remove.
+
+---
+
+### 10. Operation Log And Pandas-Style Code
+
+Each applied action shows a log of what happened and a Pandas-style code explanation.
+
+Examples of logged details:
+
+- Which columns were dropped.
+- Which uploaded rows were removed.
+- Which cells were filled.
+- Which rows and columns were edited.
+- Which numeric fills were skipped and why.
+
+Why it matters:
+
+- Cleaning should be explainable.
+- Users can learn what each cleaning action does.
+- The final report gives a record of the cleaning process.
+
+---
+
+### 11. Data Quality And Cleaning Completeness
+
+The project separates two ideas:
+
+- **Cleaning Completeness**: whether selected cleaning actions finished successfully.
+- **Data Quality Score**: how much review risk remains in the dataset.
+
+Why it matters:
+
+- A cleaning action can finish successfully while the dataset still has issues.
+- A score should not pretend the data is perfect just because selected actions ran.
+- This makes the result more honest and useful.
+
+---
+
+### 12. Temporary Session-Based Dataset Handling
+
+Each upload is stored in a separate temporary session folder.
+
+Implemented behavior:
+
+- Each user upload gets a random session folder.
+- Routes check the user's session before previewing, cleaning, or downloading files.
+- Original uploaded files are deleted after cleaned outputs are created.
+- Temporary folders are cleaned automatically.
+
+Why it matters:
+
+- Multiple users should not control each other's data.
+- Uploaded files should not stay permanently on the server.
+- Temporary storage works well for the upload-clean-download workflow.
+
+---
+
+## What Makes This Workflow Different
+
+The main goal of inDataOut is not just cleaning data. The goal is controlled cleaning.
+
+The workflow avoids over-cleaning by:
+
+- Keeping the original dataset separate.
+- Requiring Apply actions before final cleaning.
+- Showing live progress.
+- Highlighting changed cells.
+- Logging exact changes.
+- Letting users undo preview changes.
+- Reporting skipped or impossible operations honestly.
+
+This makes the project useful for users who want to prepare data without losing track of what happened.
+
+---
+
+## Implementation
+
+- **Data processing**: Pandas, NumPy
+- **Cleaning logic**: missing-value handling, duplicate checks, empty/constant column handling, outlier review, type conversion, quality scoring
+- **User workflow**: apply-first controls, live progress preview, operation log, undo, manual dataset correction
+- **Interface**: Flask, HTML, CSS, JavaScript
+- **Deployment**: Render, Gunicorn
+
+---
+
+## Final Output
+
+After cleaning, users can download:
+
+- A cleaned CSV file.
+- A JSON report with cleaning operations, summary metrics, and preview data.
+
+---
+
+## Future Improvements
+
+Possible future additions:
+
+- More advanced cell-level diff view.
+- Better pagination for very large datasets.
+- Saved cleaning recipes.
+- More visual charts for column-level data quality.
+- Stronger semantic validation for domain-specific datasets.
+
+---
+
+## Developer
+
+Built by Yaswanth Himanshu.
+
+Live project: https://indataout-data-cleaning.onrender.com
+
+GitHub: https://github.com/YaswanthHimanshu

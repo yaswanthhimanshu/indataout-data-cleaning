@@ -177,15 +177,79 @@ def data_quality_score(df: pd.DataFrame) -> float:
 
     n_rows, n_cols = df.shape
     total_cells = n_rows * n_cols
+    if total_cells == 0:
+        return 0.0
+
+    placeholder_tokens = {
+        "", "unknown", "not applicable", "n/a", "na", "null", "none",
+        "nan", "inf", "infinity", "-", "--", "---", "?", "??", "???",
+        "missing", "undefined",
+    }
+
+    def _text_series(series: pd.Series) -> pd.Series:
+        return series.astype("string").fillna("").str.strip()
+
+    def _placeholder_mask(series: pd.Series) -> pd.Series:
+        text = _text_series(series).str.lower()
+        return series.isna() | text.isin(placeholder_tokens) | text.str.fullmatch(r"#+", na=False)
+
+    def _numeric_candidate_column(col_name: str, series: pd.Series) -> bool:
+        name = str(col_name).strip().lower()
+        numeric_name_parts = (
+            "duration", "score", "rating", "vote", "income", "revenue",
+            "amount", "price", "cost", "budget", "gross", "year", "count",
+            "number", "qty", "quantity", "total", "percent", "percentage",
+        )
+        if any(part in name for part in numeric_name_parts) and not name.endswith("_id") and name != "id":
+            return True
+        non_placeholder = series[~_placeholder_mask(series)]
+        if len(non_placeholder) < 5:
+            return False
+        text = _text_series(non_placeholder)
+        digit_ratio = text.str.contains(r"\d", regex=True, na=False).mean()
+        alpha_ratio = text.str.contains(r"[A-Za-z]", regex=True, na=False).mean()
+        return digit_ratio >= 0.85 and alpha_ratio <= 0.2
+
+    def _coerce_numeric_like(series: pd.Series) -> pd.Series:
+        text = _text_series(series).str.lower()
+        text = text.str.replace(r"[$€£₹,\s]", "", regex=True)
+        thousands_dot = text.str.fullmatch(r"-?\d{1,3}(?:\.\d{3})+(?:\.\d+)?", na=False)
+        text = text.where(~thousands_dot, text.str.replace(".", "", regex=False))
+        return pd.to_numeric(text, errors="coerce")
 
     # Missing values
-    missing_pct = (df.isna().sum().sum() / total_cells) * 100 if total_cells else 0
+    missing_pct = (df.isna().sum().sum() / total_cells) * 100
 
     # Duplicates
     dup_pct = (df.duplicated().sum() / n_rows) * 100 if n_rows else 0
 
-    # Constant columns
-    const_col_pct = (df.nunique(dropna=False) <= 1).sum() / n_cols * 100 if n_cols else 0
+    # Constant columns: only count columns that contain at least one real value.
+    # Fully empty columns are handled by the missing-values/empty-column checks.
+    non_empty_cols = df.columns[~df.isna().all()]
+    const_col_pct = (df[non_empty_cols].nunique(dropna=True) <= 1).sum() / n_cols * 100 if n_cols else 0
+
+    placeholder_cells = 0
+    numeric_issue_cells = 0
+    for col in df.columns:
+        placeholder_mask = _placeholder_mask(df[col])
+        placeholder_cells += int(placeholder_mask.sum())
+        if pd.api.types.is_numeric_dtype(df[col]) or pd.api.types.is_datetime64_any_dtype(df[col]):
+            continue
+        if _numeric_candidate_column(col, df[col]):
+            coerced = _coerce_numeric_like(df[col])
+            invalid_numeric = (
+                (~placeholder_mask)
+                & _text_series(df[col]).str.contains(r"\d", regex=True, na=False)
+                & coerced.isna()
+            )
+            numeric_issue_cells += int(invalid_numeric.sum())
+
+    placeholder_pct = (placeholder_cells / total_cells) * 100
+    numeric_issue_pct = (numeric_issue_cells / total_cells) * 100
+    row_placeholder_pct = 0
+    if n_rows:
+        placeholder_frame = pd.DataFrame({c: _placeholder_mask(df[c]) for c in df.columns})
+        row_placeholder_pct = (placeholder_frame.mean(axis=1) >= 0.8).mean() * 100
 
     # Outliers (numeric columns only)
     num_df = df.select_dtypes(include=np.number)
@@ -203,11 +267,32 @@ def data_quality_score(df: pd.DataFrame) -> float:
                 outlier_count += ((num_df[col] < lower_bound) | (num_df[col] > upper_bound)).sum()
         outlier_pct = (outlier_count / num_df.size) * 100 if num_df.size > 0 else 0
 
-    # Weighted score (you can tune weights)
-    # Lower percentages result in higher quality scores
-    dq = 100 - (0.5 * missing_pct + 0.2 * dup_pct + 0.2 * outlier_pct + 0.1 * const_col_pct)
+    dq = 100 - (
+        0.45 * missing_pct +
+        0.20 * placeholder_pct +
+        0.20 * dup_pct +
+        0.15 * numeric_issue_pct +
+        0.15 * row_placeholder_pct +
+        0.10 * outlier_pct +
+        0.05 * const_col_pct
+    )
     dq = max(0, min(100, dq))
     return round(dq, 2)
+
+
+def cleaning_completeness_score(report: Dict[str, Any]) -> float:
+    """
+    Score whether selected cleaning actions finished, separate from data quality.
+    A completed run can be 100 even when the dataset still has values to review.
+    """
+    operations = report.get("operations", [])
+    failed = [
+        op for op in operations
+        if str(op.get("action", "")).endswith("_failed") or op.get("success") is False
+    ]
+    if failed:
+        return round(max(0, 100 - 20 * len(failed)), 2)
+    return 100.0
 
 
 
@@ -289,7 +374,14 @@ def convert_dtypes(df: pd.DataFrame, dtype_map: Optional[Dict[str, str]] = None)
     for c in cols:
         choice = dtype_map.get(c, "auto")
         old_dtype = str(df[c].dtype)
-        info = {"from": old_dtype, "to": choice, "coerced": 0, "success": True}
+        info = {
+            "from": old_dtype,
+            "requested": choice,
+            "to": choice,
+            "actual_dtype": old_dtype,
+            "coerced": 0,
+            "success": True,
+        }
         try:
             if choice == "auto":
                 # Prioritize: numeric > datetime > string
@@ -314,19 +406,21 @@ def convert_dtypes(df: pd.DataFrame, dtype_map: Optional[Dict[str, str]] = None)
                         df[c] = df[c].astype(object)
                         info.update({"to": "string", "coerced": 0})
             elif choice == "numeric":
-                conv, coerced = _to_numeric_safe(df[c])
+                conv = pd.to_numeric(df[c], errors="coerce")
+                coerced = int(df[c].notna().sum() - conv.notna().sum()) if df[c].notna().any() else 0
                 df[c] = conv
-                info.update({"to": "numeric", "coerced": int(coerced)})
+                info.update({"to": str(df[c].dtype), "coerced": int(coerced)})
             elif choice == "datetime":
-                conv, coerced = _to_datetime_safe(df[c])
+                conv = pd.to_datetime(df[c], errors="coerce")
+                coerced = int(df[c].notna().sum() - conv.notna().sum()) if df[c].notna().any() else 0
                 df[c] = conv
-                info.update({"to": "datetime", "coerced": int(coerced)})
+                info.update({"to": str(df[c].dtype), "coerced": int(coerced)})
             elif choice == "string":
                 df[c] = df[c].astype(object)
-                info.update({"to": "string"})
+                info.update({"to": str(df[c].dtype)})
             elif choice == "category":
                 df[c] = df[c].astype("category")
-                info.update({"to": "category"})
+                info.update({"to": str(df[c].dtype)})
             elif choice == "bool":
                 # Map string/numeric values to boolean
                 bool_map = {
@@ -338,16 +432,19 @@ def convert_dtypes(df: pd.DataFrame, dtype_map: Optional[Dict[str, str]] = None)
                     1.0: True, 0.0: False
                 }
                 # Map values and preserve NaNs
+                original_non_missing = df[c].notna()
                 mapped_values = df[c].map(bool_map)
+                coerced = int((original_non_missing & mapped_values.isna()).sum())
                 # Keep original NaN values
                 df[c] = mapped_values.where(df[c].notna(), np.nan)
                 # Convert to object dtype to preserve mixed types if needed
                 df[c] = df[c].astype('object')
-                info.update({"to": "bool"})
+                info.update({"to": "bool", "coerced": coerced})
             else:
                 info.update({"success": False, "note": "unknown_choice"})
         except Exception as e:
             info.update({"success": False, "note": str(e)})
+        info["actual_dtype"] = str(df[c].dtype)
         meta[c] = info
 
     return df, meta
@@ -388,9 +485,15 @@ def fill_categorical(
     elif strategy == "constant":
         fill_val = constant if constant else "Unknown"
         for c in cat_cols:
-            missing_before = df[c].isna().sum()
+            missing_mask = df[c].isna()
+            missing_before = missing_mask.sum()
             df[c] = df[c].fillna(fill_val)
-            meta["details"][c] = {"method": "constant", "filled": int(missing_before)}
+            meta["details"][c] = {
+                "method": "constant",
+                "filled": int(missing_before),
+                "value": str(fill_val),
+                "rows": [int(i) + 1 if isinstance(i, (int, np.integer)) else str(i) for i in df.index[missing_mask].tolist()]
+            }
             meta["filled_cells"] += int(missing_before)
         return df, meta
 
@@ -400,9 +503,15 @@ def fill_categorical(
                 mode_val = df[c].mode(dropna=True).iloc[0]
             except Exception:
                 mode_val = "Unknown"
-            missing_before = df[c].isna().sum()
+            missing_mask = df[c].isna()
+            missing_before = missing_mask.sum()
             df[c] = df[c].fillna(mode_val)
-            meta["details"][c] = {"method": "mode", "filled": int(missing_before), "value": str(mode_val)}
+            meta["details"][c] = {
+                "method": "mode",
+                "filled": int(missing_before),
+                "value": str(mode_val),
+                "rows": [int(i) + 1 if isinstance(i, (int, np.integer)) else str(i) for i in df.index[missing_mask].tolist()]
+            }
             meta["filled_cells"] += int(missing_before)
         return df, meta
 
@@ -426,16 +535,78 @@ def analyze_dataframe(df: pd.DataFrame) -> Dict[str, Any]:
       - preview: df.head(10) as records (list of dicts)
       - dtypes: mapping column -> dtype (string)
     """
-    rows, cols = df.shape
+    analysis_df = df.copy(deep=True)
+    blank_placeholders = {
+        '', '####', '#####', '######', '#######',
+        'N/A', 'n/a', 'NA', 'na', 'N.A.', 'n.a.',
+        'NULL', 'null', 'Null', 'None', 'none', 'NONE',
+        '-', '--', '---', '?', '??', '???',
+        'NaN', 'nan', 'NAN', '#N/A', '#NA', '#VALUE!', '#REF!', '#DIV/0!',
+        'undefined', 'UNDEFINED', 'missing', 'MISSING',
+        '.', '..', '...', '*', '**', '***'
+    }
+    for c in analysis_df.columns:
+        if analysis_df[c].dtype == "object":
+            analysis_df[c] = analysis_df[c].apply(
+                lambda x: np.nan if isinstance(x, str) and (x.strip() in blank_placeholders or x.strip().startswith("###")) else x
+            )
+
+    rows, cols = analysis_df.shape
     total_cells = rows * cols if cols > 0 else 1
-    missing_count = int(df.isna().sum().sum())
+    missing_count = int(analysis_df.isna().sum().sum())
     missing_percent = float(0 if total_cells == 0 else (missing_count / total_cells) * 100)
-    duplicate_count = int(df.duplicated().sum())
-    empty_columns = [c for c in df.columns if df[c].isna().all()]
+    duplicate_count = int(analysis_df.duplicated().sum())
+    empty_columns = [c for c in analysis_df.columns if analysis_df[c].isna().all()]
     dtypes = {c: str(df[c].dtype) for c in df.columns}
+    missing_by_column = []
+    for c in analysis_df.columns:
+        col_missing = int(analysis_df[c].isna().sum())
+        if col_missing > 0:
+            missing_by_column.append({
+                "column": c,
+                "missing": col_missing,
+                "percent": round((col_missing / rows) * 100, 2) if rows else 0,
+            })
+
+    def _display_value(value):
+        try:
+            if pd.isna(value):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        if isinstance(value, float) and not np.isfinite(value):
+            return str(value)
+        return value
+
+    missing_rows = []
+    if missing_count > 0:
+        missing_mask = analysis_df.isna().any(axis=1)
+        for position, (idx, row) in enumerate(analysis_df.loc[missing_mask].iterrows(), start=1):
+            missing_cols = [c for c in analysis_df.columns if pd.isna(row[c])]
+            row_position = int(analysis_df.index.get_loc(idx)) if idx in analysis_df.index else position - 1
+            missing_rows.append({
+                "row_index": int(idx) if isinstance(idx, (int, np.integer)) else str(idx),
+                "row_number": row_position + 1,
+                "data_row_number": row_position + 1,
+                "missing_columns": missing_cols,
+                "row_data": {c: _display_value(row[c]) for c in analysis_df.columns},
+            })
+
+    unnamed_columns = []
+    for c in analysis_df.columns:
+        if str(c).strip().lower().startswith("unnamed"):
+            non_missing = int(analysis_df[c].notna().sum())
+            missing = int(analysis_df[c].isna().sum())
+            unnamed_columns.append({
+                "column": c,
+                "non_missing": non_missing,
+                "missing": missing,
+                "percent_missing": round((missing / rows) * 100, 2) if rows else 0,
+                "safe_to_drop": non_missing == 0,
+            })
 
     PREVIEW_ROWS = min(len(df), 1000)
-    preview_df = df.head(PREVIEW_ROWS).copy()
+    preview_df = analysis_df.head(PREVIEW_ROWS).copy()
     for c in preview_df.columns:
         if pd.api.types.is_datetime64_any_dtype(preview_df[c]):
             preview_df[c] = preview_df[c].dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -447,6 +618,9 @@ def analyze_dataframe(df: pd.DataFrame) -> Dict[str, Any]:
         "duplicate_count": duplicate_count,
         "empty_columns": empty_columns,
         "dtypes": dtypes,
+        "missing_by_column": missing_by_column,
+        "missing_rows": missing_rows,
+        "unnamed_columns": unnamed_columns,
         "preview": preview_df.to_dict(orient="records")
     }
 
@@ -478,6 +652,10 @@ def clean_dataframe(
         "handle_outliers": options.get("handle_outliers", None),
         "encode_categoricals": options.get("encode_categoricals", False),
         "drop_constant_columns": options.get("drop_constant_columns", True),
+        "column_renames": options.get("column_renames", {}),
+        "cell_updates": options.get("cell_updates", []),
+        "missing_cell_updates": options.get("missing_cell_updates", []),
+        "drop_selected_columns": options.get("drop_selected_columns", []),
 
         "selected_outlier_rows": options.get("selected_outlier_rows", [])
     }
@@ -490,9 +668,21 @@ def clean_dataframe(
 
     working = df.copy(deep=True)
 
+    def _original_row_number(label):
+        if isinstance(label, (int, np.integer)):
+            return int(label) + 1
+        try:
+            return int(working.index.get_loc(label)) + 1
+        except Exception:
+            return str(label)
+
+    def _row_numbers(labels):
+        return [_original_row_number(label) for label in list(labels)]
+
     # 0) Replace common placeholder values with NaN (before any other processing)
     placeholder_values = [
         '####', '#####', '######', '#######',  # Excel display errors
+        '',  # blank or spaces-only cells
         'N/A', 'n/a', 'NA', 'na', 'N.A.', 'n.a.',  # Common NA representations
         'NULL', 'null', 'Null', 'None', 'none', 'NONE',  # NULL values
         '-', '--', '---', '?', '??', '???',  # Placeholder symbols
@@ -527,17 +717,99 @@ def clean_dataframe(
             working.columns = new_cols
             report["operations"].append({"action": "rename_columns", "renamed_map": renamed_map, "count": len(renamed_map)})
 
-    # 2) Trim whitespace & unify case for strings
+    def _apply_cell_updates(updates, action):
+        applied = []
+        for update in updates:
+            col = update.get("column")
+            if col not in working.columns:
+                continue
+            raw_row = update.get("row_index")
+            row_label = raw_row
+            try:
+                int_row = int(raw_row)
+                if int_row in working.index:
+                    row_label = int_row
+            except (TypeError, ValueError):
+                pass
+            if row_label not in working.index:
+                continue
+            value = update.get("value")
+            was_blank = isinstance(value, str) and value.strip() == ""
+            if was_blank:
+                value = np.nan
+            if pd.api.types.is_numeric_dtype(working[col]):
+                numeric_value = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+                if pd.notna(numeric_value):
+                    value = numeric_value
+                elif not was_blank:
+                    working[col] = working[col].astype("object")
+            working.at[row_label, col] = value
+            try:
+                logged_value = "" if pd.isna(value) else str(value)
+            except (TypeError, ValueError):
+                logged_value = str(value)
+            applied.append({
+                "row_index": row_label,
+                "row_number": int(working.index.get_loc(row_label)) + 1,
+                "column": col,
+                "value": logged_value,
+                "blank": bool(was_blank),
+            })
+        if applied:
+            report["operations"].append({
+                "action": action,
+                "count": len(applied),
+                "updates": applied,
+            })
+
+    # 2) Apply manually edited cells before automated missing handling
+    _apply_cell_updates(opts["cell_updates"], "manual_cell_updates")
+
+    # 3) Apply manually typed missing-cell values before automated missing handling
+    _apply_cell_updates(opts["missing_cell_updates"], "manual_missing_cell_updates")
+
+    manual_renames = {}
+    for old_col, new_col in opts["column_renames"].items():
+        if old_col in working.columns and new_col and old_col != new_col:
+            manual_renames[old_col] = new_col
+    if manual_renames:
+        existing = set(working.columns)
+        safe_renames = {}
+        for old_col, new_col in manual_renames.items():
+            duplicate_target = new_col in existing and new_col not in manual_renames
+            if not duplicate_target:
+                safe_renames[old_col] = new_col
+        if safe_renames:
+            working.rename(columns=safe_renames, inplace=True)
+            report["operations"].append({
+                "action": "manual_column_renames",
+                "count": len(safe_renames),
+                "renamed_map": safe_renames,
+            })
+
+    # 4) Trim whitespace & unify case for strings
     if opts["trim_whitespace"]:
         text_cols = working.select_dtypes(include=["object"]).columns.tolist()
         trimmed = 0
+        trim_details = []
         for c in text_cols:
-            before_non_null = working[c].notna().sum()
+            before = working[c].copy()
             working[c] = working[c].apply(lambda x: x.strip() if isinstance(x, str) else x)
-            after_non_null = working[c].notna().sum()
+            changed_mask = before.ne(working[c]) & before.notna()
+            changed_rows = _row_numbers(working.index[changed_mask])
             trimmed += 1
+            if changed_rows:
+                trim_details.append({
+                    "column": c,
+                    "rows": changed_rows,
+                    "count": len(changed_rows),
+                })
         if trimmed:
-            report["operations"].append({"action": "trim_whitespace", "columns_processed": text_cols})
+            report["operations"].append({
+                "action": "trim_whitespace",
+                "columns_processed": text_cols,
+                "details": trim_details,
+            })
 
 
 
@@ -566,7 +838,17 @@ def clean_dataframe(
         report.setdefault("operations", []).append({"action": "manual_convert_dtypes_failed", "error": str(e)})
 
 
-    # 6) Drop empty columns (track names + count for the report)
+    # 6) Drop user-selected columns after review
+    selected_cols = [c for c in opts["drop_selected_columns"] if c in working.columns]
+    if selected_cols:
+        working.drop(columns=selected_cols, inplace=True)
+        report["operations"].append({
+            "action": "drop_selected_columns",
+            "columns_dropped": selected_cols,
+            "count": len(selected_cols),
+        })
+
+    # 7) Drop empty columns (track names + count for the report)
     if opts["drop_empty_columns"]:
         empty_cols = [c for c in working.columns if working[c].isna().all()]
         if empty_cols:
@@ -588,29 +870,38 @@ def clean_dataframe(
 
     
 
-    # 7) Drop constant columns
+    # 8) Drop constant columns
     if opts["drop_constant_columns"]:
         constant_cols = []
         for c in working.columns:
-            if working[c].nunique(dropna=True) <= 1:
+            non_missing_count = working[c].notna().sum()
+            unique_non_missing = working[c].nunique(dropna=True)
+            if non_missing_count > 0 and unique_non_missing <= 1:
                 constant_cols.append(c)
         if constant_cols:
             working.drop(columns=constant_cols, inplace=True)
             report["operations"].append({"action": "drop_constant_columns", "columns_dropped": constant_cols, "count": len(constant_cols)})
 
-    # 8) Remove duplicates
+    # 9) Remove duplicates
     duplicates_removed = 0
     if opts["remove_duplicates"]:
         before = working.shape[0]
+        duplicated_mask = working.duplicated(subset=opts["duplicates_subset"], keep="first")
+        duplicate_rows = _row_numbers(working.index[duplicated_mask])
         if opts["duplicates_subset"]:
             working = working.drop_duplicates(subset=opts["duplicates_subset"])
         else:
             working = working.drop_duplicates()
         after = working.shape[0]
         duplicates_removed = before - after
-        report["operations"].append({"action": "drop_duplicates", "removed_rows": int(duplicates_removed), "subset": opts["duplicates_subset"]})
+        report["operations"].append({
+            "action": "drop_duplicates",
+            "removed_rows": int(duplicates_removed),
+            "subset": opts["duplicates_subset"],
+            "rows_dropped": duplicate_rows,
+        })
 
-    # 9) Handle outliers (IQR only for now)
+    # 10) Handle outliers (IQR only for now)
     outliers_removed_total = 0
     
     # Handle manually selected outlier rows BEFORE other operations that might change the dataframe structure
@@ -618,31 +909,31 @@ def clean_dataframe(
     if 'selected_outlier_rows' in opts and opts['selected_outlier_rows']:
         selected_outlier_rows = opts['selected_outlier_rows']
         
-        logging.info(f"Attempting to remove selected outlier rows early: {selected_outlier_rows}")
+        logging.info(f"Attempting to remove selected outlier rows: {selected_outlier_rows}")
         logging.info(f"Working dataframe index before outlier removal: {working.index.tolist()[:10]}... (first 10)")
-        
-        # The selected_outlier_rows are now positional indices (0, 1, 2, ...) from the original uploaded file
-        # Convert positions to actual dataframe indices for removal
-        positions = [int(p) for p in selected_outlier_rows if 0 <= int(p) < len(working)]
-        
-        logging.info(f"Valid positions to remove: {positions}")
-        
-        if positions:
-            # Get the actual indices from the current working dataframe at those positions
-            actual_indices_to_remove = working.index[positions].tolist()
-            working = working.drop(actual_indices_to_remove)
-            outliers_removed_total = len(positions)
+
+        # selected_outlier_rows contains the original DataFrame index *label* values
+        # (row_position from detect_outliers = df.index[mask], i.e. actual index labels).
+        # After drop_duplicates the index is a subset of original labels — use label-based lookup,
+        # NOT positional indexing (working.index[pos] is positional and breaks after row removal).
+        valid_indices = [int(p) for p in selected_outlier_rows if int(p) in working.index]
+
+        logging.info(f"Valid index labels to remove: {valid_indices}")
+
+        if valid_indices:
+            working = working.drop(index=valid_indices)
+            outliers_removed_total = len(valid_indices)
             report["operations"].append({
                 "action": "manual_outlier_removal",
                 "method": "user_selection",
-                "rows_removed": len(positions),
+                "rows_removed": len(valid_indices),
                 "selected_rows": selected_outlier_rows,
-                "valid_indices_dropped": actual_indices_to_remove,
-                "selected_positions": positions
+                "valid_indices_dropped": valid_indices,
+                "selected_positions": valid_indices
             })
-            logging.info(f"Successfully removed {len(positions)} outlier rows early")
+            logging.info(f"Successfully removed {len(valid_indices)} outlier rows")
         else:
-            logging.info("No valid positions found for early outlier removal")
+            logging.info("No valid index labels found for outlier removal (rows may have already been removed)")
     
     # Handle automatic outliers if enabled (for backward compatibility)
     # This is independent of manual outlier handling
@@ -679,47 +970,92 @@ def clean_dataframe(
     dropped_rows = 0
     if opts["missing_strategy"] == "drop":
         before = working.shape[0]
+        missing_row_mask = working.isna().any(axis=1)
+        rows_dropped = _row_numbers(working.index[missing_row_mask])
+        missing_columns_by_row = [
+            {
+                "row": _original_row_number(idx),
+                "columns": [c for c in working.columns if pd.isna(working.at[idx, c])]
+            }
+            for idx in working.index[missing_row_mask]
+        ]
         working = working.dropna()
         after = working.shape[0]
         dropped_rows = before - after
-        report["operations"].append({"action": "drop_missing_rows", "rows_dropped": int(dropped_rows)})
-
-
-
-    else:
-        numeric_cols = working.select_dtypes(include=[np.number]).columns.tolist()
-        for c in numeric_cols:
-            strategy = opts["fill_numeric"]
-            if strategy == "mean":
-                val = working[c].mean()
-            elif strategy == "median":
-                val = working[c].median()
-            elif strategy == "zero":
-                val = 0
-            else:
-                val = strategy
-            before_na = working[c].isna().sum()
-            if before_na > 0:
-                working[c].fillna(val, inplace=True)
-                filled_cells += before_na
-        
-        # Handle categorical missing values
-        working, cat_meta = fill_categorical(
-            working,
-            strategy=opts["fill_categorical"],
-            constant=options.get("categorical_constant", None),
-            columns=options.get("categorical_columns", None)
-        )
-        filled_cells += cat_meta.get("filled_cells", 0)
         report["operations"].append({
-            "action": "fill_categorical",
-            "strategy": cat_meta["strategy"],
-            "filled_cells": cat_meta["filled_cells"],
-            "details": cat_meta.get("details", {})
+            "action": "drop_missing_rows",
+            "rows_dropped": int(dropped_rows),
+            "row_numbers": rows_dropped,
+            "missing_columns_by_row": missing_columns_by_row,
         })
 
 
-    # 11) Encode categoricals
+
+    elif opts["missing_strategy"] == "fill":
+        numeric_filled = 0  # track separately from categorical
+        if opts["fill_numeric"] != "skip":
+            numeric_cols = working.select_dtypes(include=[np.number]).columns.tolist()
+            numeric_details = []
+            skipped_numeric_details = []
+            for c in numeric_cols:
+                strategy = opts["fill_numeric"]
+                if strategy == "mean":
+                    val = working[c].mean()
+                elif strategy == "median":
+                    val = working[c].median()
+                elif strategy == "zero":
+                    val = 0
+                else:
+                    val = strategy
+                missing_mask = working[c].isna()
+                before_na = missing_mask.sum()
+                if before_na > 0:
+                    if pd.isna(val):
+                        skipped_numeric_details.append({
+                            "column": c,
+                            "missing": int(before_na),
+                            "reason": f"{strategy} is unavailable because the column has no numeric values.",
+                            "rows": _row_numbers(working.index[missing_mask]),
+                        })
+                        continue
+                    working[c] = working[c].fillna(val)
+                    numeric_filled += int(before_na)
+                    numeric_details.append({
+                        "column": c,
+                        "filled": int(before_na),
+                        "value": str(val),
+                        "rows": _row_numbers(working.index[missing_mask]),
+                    })
+        filled_cells += numeric_filled
+        report["operations"].append({
+            "action": "fill_numeric",
+            "strategy": opts["fill_numeric"],
+            "filled_cells": numeric_filled,
+            "details": numeric_details,
+            "skipped": skipped_numeric_details,
+            "reason": None if numeric_filled > 0 or skipped_numeric_details else "No numeric missing cells were available for this option.",
+        })
+
+        # Handle categorical missing values
+        if opts["fill_categorical"] != "skip":
+            working, cat_meta = fill_categorical(
+                working,
+                strategy=opts["fill_categorical"],
+                constant=options.get("categorical_constant", None),
+                columns=options.get("categorical_columns", None)
+            )
+            filled_cells += cat_meta.get("filled_cells", 0)
+            report["operations"].append({
+                "action": "fill_categorical",
+                "strategy": cat_meta["strategy"],
+                "filled_cells": cat_meta["filled_cells"],
+                "details": cat_meta.get("details", {})
+            })
+    else:
+        report["operations"].append({"action": "skip_missing_values", "reason": "not selected for this preview"})
+
+
+    # 12) Encode categoricals
     encoded_columns = []
     if opts["encode_categoricals"] == "label":
         cat_cols = working.select_dtypes(include=["object", "category"]).columns.tolist()
@@ -743,6 +1079,7 @@ def clean_dataframe(
     report["outliers_removed"] = int(outliers_removed_total)
     report["filled_cells"] = int(filled_cells)
     report["columns_renamed"] = len(renamed_map) if renamed_map else 0
+    report["cleaned_columns"] = list(working.columns)
     # ensure empty_columns keys exist for templates even if drop_empty_columns was False
     if "empty_columns_removed" not in report:
         report["empty_columns_removed"] = 0
@@ -764,6 +1101,7 @@ def clean_dataframe(
     for c in preview.columns:
         if pd.api.types.is_datetime64_any_dtype(preview[c]):
             preview[c] = preview[c].dt.strftime('%Y-%m-%d %H:%M:%S')
+    report["preview_row_numbers"] = _row_numbers(preview.index)
     report["preview"] = preview.to_dict(orient="records")
 
     return working, report
@@ -774,6 +1112,6 @@ def clean_dataframe(
 # -------------------------
 def save_report(report: Dict[str, Any], out_path: str):
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2, default=str)
+        json.dump(report, f, indent=2, default=str, allow_nan=False)
 
 #END

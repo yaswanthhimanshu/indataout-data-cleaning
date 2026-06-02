@@ -1,392 +1,1321 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>inDataOut — Data Cleaning</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-  <!-- HEADER -->
-  <header class="topbar">
-    <div class="container header-grid">
-      <div class="brand">
-        <div class="logo">🧹</div>
-        <div class="brand-text">
-          <div class="title">inDataOut</div>
-          <div class="subtitle">Automate your data cleaning — fast &amp; safe</div>
+
+<!-- Loading Overlay -->
+<div id="loadingOverlay" class="loading-overlay">
+  <div class="spinner"></div>
+  <div id="loadingMsg" class="loading-msg">Processing…</div>
+</div>
+
+<!-- Topbar -->
+<header class="topbar">
+  <div class="container topbar-inner">
+    <div class="brand">
+      <div class="logo-mark">🧹</div>
+      <div>
+        <div class="brand-name">inDataOut</div>
+        <div class="brand-tagline">Advanced Data Cleaning</div>
+      </div>
+    </div>
+    <a href="{{ url_for('index') }}" class="btn btn-accent btn-sm">⬆ Upload Dataset</a>
+  </div>
+</header>
+
+<!-- Flash messages -->
+{% with messages = get_flashed_messages() %}
+  {% if messages %}
+  <div class="flash-container container">
+    {% for msg in messages %}
+      <div class="flash-msg">⚠️ {{ msg }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+{% endwith %}
+
+<main data-scroll-target="{% if cleaned %}results{% elif analysis %}analysis{% endif %}">
+<div class="container">
+
+<!-- ══════════════════════════════════════════
+     UPLOAD SECTION
+══════════════════════════════════════════ -->
+<section class="upload-section" id="upload">
+
+  {% if not analysis and not cleaned %}
+  <div class="upload-hero">
+    <h1>Clean Your Data <span class="gradient-text">Instantly</span></h1>
+    <p>Upload a dataset, configure cleaning options, and download a clean file — in seconds.</p>
+  </div>
+  {% endif %}
+
+  <div class="upload-card">
+    <form id="uploadForm" action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data">
+      <input id="fileInput" name="file" type="file"
+             accept=".csv,.tsv,.txt,.xlsx,.xls,.json" hidden>
+
+      <div id="dropZone" class="drop-zone {% if uploaded_filename %}has-file{% endif %}"
+           role="button" tabindex="0" aria-label="File upload zone">
+
+        {% if uploaded_filename %}
+          <div class="file-loaded">
+            <span class="file-loaded-icon">📄</span>
+            <div>
+              <div class="file-loaded-name">{{ uploaded_filename }}</div>
+              {% if analysis %}
+              <div class="file-loaded-meta">
+                {{ analysis.shape[0] }} rows &times; {{ analysis.shape[1] }} columns
+              </div>
+              {% endif %}
+            </div>
+          </div>
+          <div class="file-actions">
+            <button id="chooseBtn" type="button" class="btn btn-outline btn-sm">↑ Replace File</button>
+            <a href="{{ url_for('index') }}" class="btn btn-ghost btn-sm">✕ Clear</a>
+          </div>
+
+        {% else %}
+          <div class="drop-icon">📂</div>
+          <div class="drop-title">Drag &amp; drop your dataset here</div>
+          <div class="drop-sub">or</div>
+          <button id="chooseBtn" type="button" class="btn btn-accent">Browse Files</button>
+          <div class="file-type-badges">
+            <span class="badge">CSV</span><span class="badge">TSV</span>
+            <span class="badge">XLSX</span><span class="badge">XLS</span>
+            <span class="badge">JSON</span><span class="badge">TXT</span>
+          </div>
+        {% endif %}
+
+      </div>
+    </form>
+
+    <div class="upload-footer">
+      <span>🔒 Files are processed in isolated sessions and auto-deleted after download</span>
+      <span>Max 100 MB</span>
+    </div>
+  </div>
+
+</section><!-- /upload -->
+
+
+{% if analysis %}
+<!-- ══════════════════════════════════════════
+     ANALYSIS SECTION
+══════════════════════════════════════════ -->
+<section class="section" id="analysis">
+
+  <!-- Stats Cards -->
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-icon">📋</div>
+      <div class="stat-body">
+        <div class="stat-val">{{ analysis.shape[0] }}</div>
+        <div class="stat-label">Rows</div>
+      </div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-icon">🔢</div>
+      <div class="stat-body">
+        <div class="stat-val">{{ analysis.shape[1] }}</div>
+        <div class="stat-label">Columns</div>
+      </div>
+    </div>
+    <div class="stat-card {% if analysis.missing_count > 0 %}stat-warn{% endif %}">
+      <div class="stat-icon">❓</div>
+      <div class="stat-body">
+        <div class="stat-val">{{ analysis.missing_count }}</div>
+        <div class="stat-label">Missing Values <span class="stat-pct">({{ analysis.missing_percent }}%)</span></div>
+      </div>
+    </div>
+    <div class="stat-card {% if analysis.duplicate_count > 0 %}stat-warn{% endif %}">
+      <div class="stat-icon">🔁</div>
+      <div class="stat-body">
+        <div class="stat-val">{{ analysis.duplicate_count }}</div>
+        <div class="stat-label">Duplicate Rows</div>
+      </div>
+    </div>
+    <div class="stat-card {% if analysis.empty_columns | length > 0 %}stat-warn{% endif %}">
+      <div class="stat-icon">📭</div>
+      <div class="stat-body">
+        <div class="stat-val">{{ analysis.empty_columns | length }}</div>
+        <div class="stat-label">Empty Columns</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Issues Banner -->
+  {% if analysis.missing_count > 0 or analysis.duplicate_count > 0 or analysis.empty_columns | length > 0 %}
+  <div class="issues-banner">
+    <span class="issues-icon">⚠️</span>
+    <div class="issues-content">
+      <strong>Issues detected — configure and run cleaning below</strong>
+      <div class="issue-tags">
+        {% if analysis.missing_count > 0 %}
+          <span class="issue-tag">{{ analysis.missing_count }} missing values ({{ analysis.missing_percent }}%)</span>
+        {% endif %}
+        {% if analysis.duplicate_count > 0 %}
+          <span class="issue-tag">{{ analysis.duplicate_count }} duplicate rows</span>
+        {% endif %}
+        {% for col in analysis.empty_columns %}
+          <span class="issue-tag">Empty column: <code>{{ col }}</code></span>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <div class="clean-banner">✅ No obvious issues detected — your dataset looks clean. You can still apply cleaning operations below.</div>
+  {% endif %}
+
+  <div class="dataset-slide-shell">
+    <div class="dataset-slide-tabs" role="tablist" aria-label="Dataset views">
+      <button type="button" class="dataset-tab active" data-dataset-slide="originalDatasetSlide">Original Uploaded Dataset</button>
+      <button type="button" class="dataset-tab" data-dataset-slide="datasetEditorSlide">Dataset Editor</button>
+      <button type="button" class="dataset-tab" data-dataset-slide="progressDatasetSlide">Cleaning Work Progress</button>
+    </div>
+  </div>
+
+  <!-- ── Cleaning Options Form ── -->
+  <form id="cleanForm" action="{{ url_for('clean') }}" method="post"
+        onsubmit="return onCleanSubmit(event)">
+    <input type="hidden" name="filename" value="{{ uploaded_filename }}">
+
+    <div class="clean-workspace">
+    <aside class="workflow-rail">
+      <div class="rail-file">
+        <span class="rail-file-icon">CSV</span>
+        <div>
+          <strong title="{{ uploaded_filename }}">{{ uploaded_filename }}</strong>
+          <span>{{ analysis.shape[0] }} rows / {{ analysis.shape[1] }} columns</span>
         </div>
       </div>
-      <nav class="top-actions">
-        <a class="cta" href="#upload">Upload dataset</a>
-      </nav>
-    </div>
-  </header>
 
-  <main class="container main">
-    <!-- HERO -->
-    <section class="hero">
-      <h1 class="hero-title">
-        <span class="hero-strong">Clean</span>
-        <span class="hero-rest"> Your Data — Upload a dataset</span>
-      </h1>
-      <p class="hero-sub">
-        Supported: <strong>CSV, TSV, Excel (.xlsx/.xls), JSON</strong> — upload, preview issues, clean, and download.
-      </p>
+      <div class="rail-section">Dataset Views</div>
+      <button type="button" class="rail-link rail-dataset-btn active" data-dataset-slide="originalDatasetSlide">Original Uploaded Dataset</button>
+      <button type="button" class="rail-link rail-dataset-btn" data-dataset-slide="datasetEditorSlide">Dataset Editor</button>
+      <button type="button" class="rail-link rail-dataset-btn" data-dataset-slide="progressDatasetSlide">Cleaning Work Progress</button>
 
-      <div class="hero-actions" id="upload">
-        <!-- UPLOAD CARD -->
-        <div class="drop-card">
-          <form id="uploadForm" action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data" class="upload-area">
-            <input id="fileInput" name="file" type="file" accept=".csv,.tsv,.txt,.xlsx,.xls,.json" hidden>
-            <div id="dropZone" class="drop-zone" role="button" tabindex="0" aria-describedby="upload-hint">
-              <div class="drop-content">
-                {% if uploaded_filename %}
-                  <div class="file-name">Uploaded: <strong>{{ uploaded_filename }}</strong></div>
-                  <div class="meta small">{% if analysis %}<span>{{ analysis.shape[0] }} rows × {{ analysis.shape[1] }} columns</span>{% endif %}</div>
-                  <div class="inline-ctrls">
-                    <button id="chooseBtn" type="button" class="choose-btn">Choose another</button>
-                    <a href="{{ url_for('index') }}" class="choose-btn neutral">Reset</a>
-                  </div>
-                {% else %}
-                  <div class="upload-icon">⬆️</div>
-                  <div class="drop-title">Drop your dataset here</div>
-                  <div class="drop-sub">or click to browse</div>
-                  <div class="inline-ctrls">
-                    <button id="chooseBtn" type="button" class="choose-btn">Choose File</button>
-                  </div>
-                  <div id="upload-hint" class="hint">Supported: CSV, TSV, TXT, Excel (.xlsx/.xls), JSON • Max 100MB</div>
-                {% endif %}
-              </div>
-            </div>
-            <input id="submitBtn" type="submit" style="display:none;">
-          </form>
+      <div class="rail-section">Cleaning Actions</div>
+      <a class="rail-link rail-panel-link active" href="#dataIntegrityGroup" data-panel-target="dataIntegrityGroup">Data Integrity</a>
+      <a class="rail-link rail-panel-link" href="#missingValuesGroup" data-panel-target="missingValuesGroup">Missing Values</a>
+      <a class="rail-link rail-panel-link" href="#dataTypesGroup" data-panel-target="dataTypesGroup">Data Types</a>
+      <a class="rail-link rail-panel-link" href="#outlierGroup" data-panel-target="outlierGroup">Outliers</a>
+      <a class="rail-link rail-panel-link" href="#advancedGroup" data-panel-target="advancedGroup">Advanced Options</a>
 
-          <div class="privacy-line">
-            <span class="lock">🔒</span>
-            <div class="privacy-text">Your files are processed temporarily and deleted automatically after download.</div>
-          </div>
+      <div class="rail-section">Final Output</div>
+      <button type="submit" class="rail-primary-action">Clean Data</button>
+    </aside>
+
+    <!-- Data Preview (before cleaning) -->
+    <div class="preview-card preview-card-primary dataset-slide active" id="originalDatasetSlide">
+      <div class="preview-card-header">
+        <h3 class="preview-title">Original Uploaded Dataset</h3>
+        <span class="preview-meta">
+          {% if analysis.preview | length < analysis.shape[0] %}
+            Showing first {{ analysis.preview | length }} of {{ analysis.shape[0] }} rows
+          {% else %}
+            {{ analysis.preview | length }} rows
+          {% endif %}
+        </span>
+      </div>
+      <div class="preview-card-body">
+        {% if analysis.preview and analysis.preview | length > 0 %}
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                {% for col in analysis.preview[0].keys() %}<th>{{ col }}</th>{% endfor %}
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in analysis.preview %}
+              <tr>
+                {% for val in row.values() %}
+                  <td title="{{ val }}">{{ val if val is not none else '' }}</td>
+                {% endfor %}
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
         </div>
+        {% else %}
+          <div style="padding:20px;text-align:center;color:var(--text-muted);">No preview data available.</div>
+        {% endif %}
+      </div>
+    </div>
+
+    <section class="preview-card dataset-editor-card dataset-slide" id="datasetEditorSlide">
+      <div class="preview-card-header dataset-editor-header">
+        <div>
+          <h3 class="preview-title">Dataset Editor</h3>
+          <p class="dataset-editor-subtitle">Edit any visible cell. Changed cells are applied before cleaning; unchanged cells are not submitted.</p>
+        </div>
+        <span class="preview-meta">
+          {% if analysis.preview | length < analysis.shape[0] %}
+            Editing first {{ analysis.preview | length }} of {{ analysis.shape[0] }} rows
+          {% else %}
+            Editing {{ analysis.preview | length }} rows
+          {% endif %}
+        </span>
+      </div>
+
+      <div class="dataset-editor-tools">
+        <input type="search" id="cellSearchInput" class="cell-search-input" placeholder="Search value">
+        <select id="cellSearchColumn" class="cell-search-select">
+          <option value="">All columns</option>
+          {% for col in analysis.dtypes.keys() %}
+            <option value="{{ col }}">{{ col }}</option>
+          {% endfor %}
+        </select>
+        <input type="number" id="cellSearchRow" class="cell-search-row" min="1" placeholder="Row #">
+        <button type="button" id="cellSearchBtn" class="btn btn-outline btn-sm">Find Cells</button>
+        <button type="button" id="clearCellSearchBtn" class="btn btn-ghost btn-sm">Clear</button>
+        <span id="cellSearchStatus" class="cell-search-status">No search yet.</span>
+      </div>
+
+      <div class="dataset-edit-wrap">
+        {% if analysis.preview and analysis.preview | length > 0 %}
+        <table class="dataset-edit-table">
+          <thead>
+            <tr>
+              <th>Uploaded Row #</th>
+              {% for col in analysis.preview[0].keys() %}
+              <th data-column="{{ col }}">
+                <input type="text"
+                       class="dataset-column-input"
+                       data-name="column_rename[{{ col }}]"
+                       data-original="{{ col }}"
+                       data-column="{{ col }}"
+                       value="{{ col }}">
+              </th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in analysis.preview %}
+            {% set row_pos = loop.index0 %}
+            <tr>
+              <td class="dataset-edit-row-number">Row {{ row_pos + 1 }}</td>
+              {% for col, val in row.items() %}
+              <td data-column="{{ col }}">
+                <input type="text"
+                       class="dataset-edit-input"
+                       data-name="cell_update[{{ row_pos }}][{{ col }}]"
+                       data-original="{{ val if val is not none else '' }}"
+                       data-column="{{ col }}"
+                       data-row-number="{{ row_pos + 1 }}"
+                       value="{{ val if val is not none else '' }}">
+              </td>
+              {% endfor %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+          <div style="padding:20px;text-align:center;color:var(--text-muted);">No editable data available.</div>
+        {% endif %}
+      </div>
+
+      <div class="dataset-editor-actions">
+        <div id="datasetEditStatus" class="missing-editor-status">No edited cells yet.</div>
+        <button type="button" id="applyDatasetEditsBtn" class="btn btn-accent btn-sm">Apply Edited Cells</button>
       </div>
     </section>
 
-<!-- FEATURES -->
-<section id="features" class="container-section">
-  <h2 class="section-title">What this tool does</h2>
-  <div class="cards compact-cards features">
-    <div class="card feature-card">
-      <div class="card-title">Automatic & Manual Cleaning</div>
-      <div class="card-val">Fixes missing values, trims spaces, and lets you manually convert column data types.</div>
-    </div>
-    <div class="card feature-card">
-      <div class="card-title">Categorical Filling</div>
-      <div class="card-val">Automatically fills missing categorical (text) values using Mode or Constant strategy.</div>
-    </div>
-    <div class="card feature-card">
-      <div class="card-title">Data Quality Insights</div>
-      <div class="card-val">Shows data quality score before and after cleaning — see how much your data improved.</div>
-    </div>
-    <div class="card feature-card">
-      <div class="card-title">Duplicate & Outlier Handling</div>
-      <div class="card-val">Removes duplicate rows and caps or removes outliers safely.</div>
-    </div>
-    <div class="card feature-card">
-      <div class="card-title">Quick Preview & Download</div>
-      <div class="card-val">View dataset summary and download cleaned files instantly.</div>
-    </div>
-    <div class="card feature-card">
-      <div class="card-title">Safe & Local</div>
-      <div class="card-val">Runs securely on your server — no external data storage.</div>
-    </div>
-  </div>
-</section>
+    <aside class="clean-sidebar">
+    <div class="options-card">
+      <div class="options-card-header">
+        <h2 class="options-title">Cleaning Controls</h2>
+        <p class="options-subtitle">Choose exactly how the live spreadsheet should be cleaned. Each panel updates the preview before final download.</p>
+      </div>
+      <div class="options-body">
 
-    {% if analysis %}
-      <!-- ANALYSIS SECTION -->
-      <section class="analysis">
-        <div class="analysis-top">
-          <div>
-            <h3 class="small-title">Dataset Summary</h3>
-            <div class="meta">File: <strong>{{ uploaded_filename }}</strong></div>
-          </div>
+        <!-- ── GROUP 1: Data Integrity ── -->
+        <div class="opt-group" id="dataIntegrityGroup">
+          <div class="opt-group-label">🧹 Data Integrity</div>
 
-          <div class="actions-row">
-            <form id="cleanForm" action="{{ url_for('clean') }}" method="post" style="margin:0" onsubmit="return captureSelectedOutliers();">
-              <input type="hidden" name="filename" value="{{ uploaded_filename }}">
-              <button type="submit" class="choose-btn">Clean Data</button>
-              <button id="advToggle" type="button" class="choose-btn secondary">Advanced Options</button>
-
-              <!-- Advanced Options -->
-              <div id="advanced" class="advanced-panel" style="display:none;margin-top:14px;">
-                <h4>Advanced Cleaning Options</h4>
-                <div class="adv-grid">
-                  <label class="adv-item"><input type="checkbox" name="remove_duplicates" value="1" checked> Remove duplicates
-                    <div class="adv-desc">Delete identical rows.</div>
-                  </label>
-                  <label class="adv-item"><input type="checkbox" name="drop_empty_columns" value="1" checked> Drop empty columns
-                    <div class="adv-desc">Remove columns with only missing values.</div>
-                  </label>
-                  <label class="adv-item"><input type="checkbox" name="drop_constant_columns" value="1" checked> Drop constant columns
-                    <div class="adv-desc">Remove columns that contain one repeated value.</div>
-                  </label>
-                  <label class="adv-item"><input type="checkbox" name="trim_whitespace" value="1" checked> Trim whitespace
-                    <div class="adv-desc">Remove spaces around text values.</div>
-                  </label>
-                  <label class="adv-item"><input type="checkbox" name="convert_dtypes" value="1" checked> Convert data types
-                    <div class="adv-desc">Convert numeric/date-like text to proper types.</div>
-                  </label>
-                  <label class="adv-item"><input type="checkbox" name="handle_outliers" value="1" style="display:none;"> <!-- Hidden, we'll use button instead -->
-                  <button type="button" id="previewOutliersBtn" class="choose-btn secondary" style="margin-bottom:8px;">Preview Outliers</button>
-                    <div class="adv-desc">Click to see detected outliers and select which rows to remove.</div>
-                  </label>
-
-                  <!-- Outlier Preview Section -->
-                  <div id="outlierPreviewSection" style="display:none;margin-top:10px;">
-                    <h5>Detected Outliers</h5>
-                    <div class="hint" style="margin-bottom:8px;">Select outlier rows you want to remove</div>
-                    <div class="table-wrap">
-                      <table class="preview-table">
-                        <thead>
-                          <tr>
-                            <th><input type="checkbox" id="selectAllOutliers"> Select All</th>
-                            <th>Row Index</th>
-                            <th>Column</th>
-                            <th>Value</th>
-                          </tr>
-                        </thead>
-                        <tbody id="outlierTableBody">
-                          <!-- Outlier rows will be populated here -->
-                        </tbody>
-                      </table>
-                    </div>
-                    <div style="margin-top:8px;">
-                      <div class="hint" id="outlierCountInfo"></div>
-                    </div>
-                  </div>
-
-                  <!-- Missing strategy -->
-                  <label class="adv-item">Missing strategy:
-                    <select name="missing_strategy">
-                      <option value="fill" selected>Fill (recommended)</option>
-                      <option value="drop">Drop rows</option>
-                    </select>
-                    <div class="adv-desc">Decide how to handle missing data.</div>
-                  </label>
-
-                  <!-- fill numeric block -->
-                  <label class="adv-item">Fill numeric:
-                    <select name="fill_numeric">
-                      <option value="mean" selected>Mean</option>
-                      <option value="median">Median</option>
-                      <option value="zero">Zero</option>
-                    </select>
-                    <div class="adv-desc">Strategy for filling numeric missing values.</div>
-                  </label>
-
-                  <!--  Fill categorical -->
-                  <label class="adv-item">Fill categorical:
-                    <select name="fill_categorical">
-                      <option value="mode" selected>Mode</option>
-                      <option value="constant">Constant (blank)</option>
-                    </select>
-                    <div class="adv-desc">Strategy for filling missing categorical values.</div>
-                  </label>
-
-                  <!-- Manual datatype selection -->
-                  <div class="adv-item" style="flex:1 1 100%;margin-top:8px;">
-                    <h4 style="margin-top:6px;margin-bottom:6px;">Detected Column Types — Select Conversion</h4>
-                    <div class="dtype-grid" style="max-height:260px;overflow:auto;padding:6px;border:1px solid #eee;border-radius:6px;">
-                      {% if analysis and analysis.dtypes %}
-                        {% for col, dtype in analysis.dtypes.items() %}
-                          <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-                            <div style="min-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ col }}</div>
-                            <select name="dtype_map[{{ col }}]" style="min-width:150px;">
-                              <option value="auto" selected>Auto</option>
-                              <option value="numeric">Numeric</option>
-                              <option value="datetime">Datetime</option>
-                              <option value="string">String</option>
-                              <option value="category">Category</option>
-                              <option value="bool">Boolean</option>
-                            </select>
-                          </label>
-                        {% endfor %}
-                      {% else %}
-                        <div class="hint small">Column types will appear here after upload.</div>
-                      {% endif %}
-                    </div>
-                    <div class="hint" style="margin-top:6px;">Select a type for each column. “Auto” lets the system detect automatically.</div>
-                  </div>
-                  <!-- /Manual datatype selection -->
-
-                </div>
-                <div class="hint">Options apply when you click <strong>Clean Data</strong>.</div>
+          <!-- Remove Duplicates -->
+          <div class="opt-item">
+            <div class="opt-toggle-col">
+              <label class="toggle">
+                <input type="hidden" name="remove_duplicates" value="0">
+                <input type="checkbox" name="remove_duplicates" value="1">
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              </label>
+            </div>
+            <div class="opt-info">
+              <div class="opt-header">
+                <span class="opt-name">Remove Duplicate Rows</span>
+                <span class="badge badge-green">Recommended</span>
+                {% if analysis.duplicate_count > 0 %}
+                  <span class="badge badge-orange">{{ analysis.duplicate_count }} found</span>
+                {% endif %}
               </div>
-            </form>
+              <div class="opt-desc">Deletes every row that is 100% identical to another row in the dataset. Keeps the first occurrence.</div>
+              <div class="opt-why">💡 Duplicates inflate record counts, bias averages, and cause ML models to over-learn repeated samples.</div>
+            </div>
           </div>
-        </div>
 
-        <!-- SUMMARY -->
-        <div class="cards summary-cards">
-          <div class="card"><div class="card-title">Rows</div><div class="card-val">{{ analysis.shape[0] }}</div></div>
-          <div class="card"><div class="card-title">Columns</div><div class="card-val">{{ analysis.shape[1] }}</div></div>
-          <div class="card"><div class="card-title">Missing</div><div class="card-val">{{ analysis.missing_count }} ({{ analysis.missing_percent }}%)</div></div>
-          <div class="card"><div class="card-title">Duplicates</div><div class="card-val">{{ analysis.duplicate_count }}</div></div>
-          <div class="card"><div class="card-title">Empty Columns</div><div class="card-val">{{ analysis.empty_columns|length }}</div></div>
-        </div>
+          <!-- Drop Empty Columns -->
+          <div class="opt-item">
+            <div class="opt-toggle-col">
+              <label class="toggle">
+                <input type="hidden" name="drop_empty_columns" value="0">
+                <input type="checkbox" name="drop_empty_columns" value="1">
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              </label>
+            </div>
+            <div class="opt-info">
+              <div class="opt-header">
+                <span class="opt-name">Drop Fully Empty Columns</span>
+                <span class="badge badge-green">Recommended</span>
+                {% if analysis.empty_columns | length > 0 %}
+                  <span class="badge badge-orange">{{ analysis.empty_columns | length }} found</span>
+                {% endif %}
+              </div>
+              <div class="opt-desc">Removes columns where <strong>every single value</strong> is missing (100% null). These columns carry no information.</div>
+              {% if analysis.empty_columns %}
+                <div class="opt-why">💡 Will remove: <code>{{ analysis.empty_columns | join('</code>, <code>') }}</code></div>
+              {% else %}
+                <div class="opt-why">💡 No fully empty columns detected in this dataset.</div>
+              {% endif %}
+            </div>
+          </div>
 
-        <!-- PREVIEW -->
-        <div class="preview">
-          <h4 class="small-title">Data Preview</h4>
-          {% if analysis.preview and analysis.preview|length > 0 %}
-            <div class="table-wrap">
-              <table class="preview-table">
+          {% if analysis.unnamed_columns and analysis.unnamed_columns | length > 0 %}
+          <div class="unnamed-review-panel">
+            <div class="unnamed-review-title">Unnamed Columns Review</div>
+            <div class="unnamed-review-subtitle">Fully empty unnamed columns are safe to remove. Unnamed columns with data need your decision.</div>
+            <div class="unnamed-column-list">
+              {% for item in analysis.unnamed_columns %}
+              <div class="unnamed-column-row">
+                <div>
+                  <div class="unnamed-column-name">{{ item.column }}</div>
+                  <div class="unnamed-column-meta">
+                    {{ item.non_missing }} values, {{ item.missing }} missing ({{ item.percent_missing }}%)
+                  </div>
+                </div>
+                {% if item.safe_to_drop %}
+                  <span class="badge badge-green">Safe auto-drop</span>
+                {% else %}
+                  <label class="mini-check">
+                    <input type="checkbox" name="drop_column[{{ item.column }}]" value="1">
+                    Drop
+                  </label>
+                {% endif %}
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+          {% endif %}
+
+          <!-- Drop Constant Columns -->
+          <div class="opt-item">
+            <div class="opt-toggle-col">
+              <label class="toggle">
+                <input type="hidden" name="drop_constant_columns" value="0">
+                <input type="checkbox" name="drop_constant_columns" value="1">
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              </label>
+            </div>
+            <div class="opt-info">
+              <div class="opt-header">
+                <span class="opt-name">Drop Constant Columns</span>
+                <span class="badge badge-green">Recommended</span>
+              </div>
+              <div class="opt-desc">Removes columns where all non-null values are identical (zero variance). Example: a column where every row says "Active".</div>
+              <div class="opt-why">💡 Constant columns provide zero information for analysis or modelling and waste memory.</div>
+            </div>
+          </div>
+
+          <!-- Trim Whitespace -->
+          <div class="opt-item">
+            <div class="opt-toggle-col">
+              <label class="toggle">
+                <input type="hidden" name="trim_whitespace" value="0">
+                <input type="checkbox" name="trim_whitespace" value="1">
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              </label>
+            </div>
+            <div class="opt-info">
+              <div class="opt-header">
+                <span class="opt-name">Trim Whitespace</span>
+                <span class="badge badge-green">Recommended</span>
+              </div>
+              <div class="opt-desc">Strips leading and trailing spaces from all text values. Example: <code>" John "</code> becomes <code>"John"</code>.</div>
+              <div class="opt-why">💡 Invisible spaces cause false "mismatches" when filtering, joining datasets, or grouping values.</div>
+            </div>
+          </div>
+          <button type="button" class="btn btn-outline btn-sm section-apply-btn" data-section-name="Data Integrity">Apply Data Integrity</button>
+        </div><!-- /group 1 -->
+
+        <!-- ── GROUP 2: Missing Values ── -->
+        <div class="opt-group" id="missingValuesGroup">
+          <div class="opt-group-label">🩹 Missing Values</div>
+
+          <!-- Strategy Select -->
+          <div class="opt-item opt-item-select">
+            <div class="opt-info">
+              <div class="opt-header">
+                <span class="opt-name">Missing Value Strategy</span>
+                {% if analysis.missing_count > 0 %}
+                  <span class="badge badge-orange">{{ analysis.missing_count }} missing cells</span>
+                {% endif %}
+              </div>
+              <div class="opt-desc">How to handle cells that contain no value at all.</div>
+              <div class="opt-why">💡 <strong>Fill</strong> keeps your row count intact and is safer. <strong>Drop rows</strong> removes any row that has at least one missing value — only use this if missing data is strictly unacceptable.</div>
+              <select name="missing_strategy" class="opt-select" id="missingStrategySelect">
+                <option value="ignore" selected>Do not handle missing values yet</option>
+                <option value="fill">Fill missing values</option>
+                <option value="drop">Drop rows that contain any missing value</option>
+              </select>
+            </div>
+          </div>
+
+          {% if analysis.missing_by_column and analysis.missing_by_column | length > 0 %}
+          <div class="missing-review-panel">
+            <div class="missing-review-header">
+              <div>
+                <div class="missing-review-title">Missing Values Found</div>
+                <div class="missing-review-subtitle">Use the spreadsheet editor below to type values directly into blank cells before applying fill or drop rules.</div>
+              </div>
+              <span class="badge badge-orange">{{ analysis.missing_count }} missing cells</span>
+            </div>
+
+            <div class="missing-column-summary">
+              {% for item in analysis.missing_by_column %}
+                <span class="missing-count-pill" data-column="{{ item.column }}">{{ item.column }}: {{ item.missing }} ({{ item.percent }}%)</span>
+              {% endfor %}
+            </div>
+          </div>
+          {% endif %}
+
+          {% if analysis.missing_rows and analysis.missing_rows | length > 0 %}
+          <div class="wide-missing-editor">
+            <div class="wide-missing-header">
+              <div>
+                <h3>Manual Missing Value Editor</h3>
+                <p>Every row below contains at least one missing value. Type into highlighted blank cells, then apply typed values to update the Cleaning Work Progress preview.</p>
+              </div>
+              <span class="badge badge-orange">{{ analysis.missing_rows | length }} affected rows</span>
+            </div>
+            <div class="missing-editor-wrap">
+              <table class="missing-editor-table">
                 <thead>
-                  <tr>{% for col in analysis.preview[0].keys() %}<th>{{ col }}</th>{% endfor %}</tr>
+                  <tr>
+                    <th>Uploaded Row #</th>
+                    {% for col in analysis.dtypes.keys() %}
+                      <th data-column="{{ col }}">{{ col }}</th>
+                    {% endfor %}
+                  </tr>
                 </thead>
                 <tbody>
-                  {% for row in analysis.preview %}
-                    <tr>{% for val in row.values() %}<td>{{ val }}</td>{% endfor %}</tr>
-                  {% endfor %}
+                {% for row in analysis.missing_rows %}
+                  <tr data-row-number="{{ row.row_number }}">
+                    <td class="missing-row-number">Row {{ row.row_number }}</td>
+                    {% for col in analysis.dtypes.keys() %}
+                      {% if col in row.missing_columns %}
+                        <td class="missing-cell-edit" data-column="{{ col }}">
+                          <input type="text"
+                                 name="missing_cell[{{ row.row_index }}][{{ col }}]"
+                                 data-column="{{ col }}"
+                                 data-row-number="{{ row.row_number }}"
+                                 placeholder="Type value">
+                        </td>
+                      {% else %}
+                        <td data-column="{{ col }}" title="{{ row.row_data[col] }}">{{ row.row_data[col] }}</td>
+                      {% endif %}
+                    {% endfor %}
+                  </tr>
+                {% endfor %}
                 </tbody>
               </table>
             </div>
-          {% else %}
-            <div class="hint">No preview available for this dataset.</div>
+            <div class="missing-editor-actions">
+              <div id="missingEditorStatus" class="missing-editor-status">No typed values yet.</div>
+              <button type="button" id="applyTypedPreviewBtn" class="btn btn-accent btn-sm">Apply Typed Values</button>
+            </div>
+          </div>
           {% endif %}
-        </div>
-      </section>
-    {% endif %}
 
-    {% if cleaned %}
-      <!-- CLEANED RESULT -->
-      <section class="cleaned">
-        <h3 class="small-title">Data Cleaned Successfully!</h3>
-        <div class="clean-grid">
-          <div><strong>Rows processed:</strong> {{ cleaned.report.rows_processed }}</div>
-          <div><strong>Rows after:</strong> {{ cleaned.report.rows_after }}</div>
-          <div><strong>Duplicates removed:</strong> {{ cleaned.report.duplicates_removed }}</div>
-          <div><strong>Outliers removed:</strong> {{ cleaned.report.outliers_removed }}</div>
-          <div><strong>Filled cells:</strong> {{ cleaned.report.filled_cells }}</div>
-          <div><strong>Columns renamed:</strong> {{ cleaned.report.columns_renamed }}</div>
-          <div><strong>Empty columns removed:</strong> {{ cleaned.report.empty_columns|length if cleaned.report.empty_columns is defined else 0 }}</div>
-        </div>
-
-        <!-- Data Quality Score card -->
-        <div class="dq-card" aria-live="polite" style="margin:12px 0 14px;padding:12px;border-radius:10px;background:#fff;border:1px solid rgba(0,0,0,0.05);box-shadow:0 6px 18px rgba(0,0,0,0.03);">
-          <div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;">
-            <div style="min-width:110px;">
-              <div style="font-size:12px;color:var(--muted);">Before</div>
-              <div style="font-weight:700;font-size:18px;">{{ cleaned.report.data_quality_before if cleaned.report.data_quality_before is not none else 'N/A' }}</div>
-            </div>
-
-            <div style="min-width:110px;">
-              <div style="font-size:12px;color:var(--muted);">After</div>
-              <div style="font-weight:700;font-size:18px;">{{ cleaned.report.data_quality_after if cleaned.report.data_quality_after is not none else 'N/A' }}</div>
-            </div>
-
-            <div style="min-width:150px;">
-              <div style="font-size:12px;color:var(--muted);">Improvement</div>
-              <div class="dq-improvement" data-dq="{{ cleaned.report.dq_improvement if cleaned.report.dq_improvement is not none else '' }}" style="font-weight:700;font-size:16px;">
-                {% if cleaned.report.dq_improvement is not none %}
-                  {% if cleaned.report.dq_improvement >= 0 %}+{{ cleaned.report.dq_improvement }}{% else %}{{ cleaned.report.dq_improvement }}{% endif %}
-                {% else %}N/A{% endif %}
+          <!-- Fill sub-options (hidden when drop is selected) -->
+          <div id="fillSubOptions">
+            <div class="opt-item opt-item-select">
+              <div class="opt-info">
+                <div class="opt-header">
+                  <span class="opt-name">Fill Numeric Missing Values With</span>
+                </div>
+                <div class="opt-desc">Strategy for filling empty cells in number columns.</div>
+                <div class="opt-why">💡 <strong>Mean</strong> is good for normally distributed data. <strong>Median</strong> is better when your data has outliers. <strong>Zero</strong> is useful for count or flag columns.</div>
+                <select name="fill_numeric" class="opt-select">
+                  <option value="mean" selected>Mean — column average</option>
+                  <option value="median">Median — middle value of column</option>
+                  <option value="zero">Zero — fill with 0</option>
+                </select>
               </div>
             </div>
 
-            <div style="flex:1;min-width:220px;">
-              <div style="font-size:12px;color:var(--muted);margin-bottom:6px;">Overall quality (after)</div>
-              <div class="dq-progress-outer" aria-hidden="true" style="background:#f1f5f9;border-radius:999px;height:12px;overflow:hidden;">
-                <div class="dq-progress-bar" data-after="{{ cleaned.report.data_quality_after if cleaned.report.data_quality_after is not none else 0 }}" style="height:100%;width:0%;transition:width 700ms ease;background:linear-gradient(90deg,#10b981,#06b6d4);"></div>
+            <div class="opt-item opt-item-select">
+              <div class="opt-info">
+                <div class="opt-header">
+                  <span class="opt-name">Fill Text / Category Missing Values With</span>
+                </div>
+                <div class="opt-desc">Strategy for filling empty cells in text or categorical columns.</div>
+                <div class="opt-why">💡 <strong>Mode</strong> fills with the most common value, maintaining the column's distribution. <strong>"Unknown"</strong> explicitly marks gaps without guessing.</div>
+                <select name="fill_categorical" class="opt-select">
+                  <option value="mode" selected>Mode — most frequent value in the column</option>
+                  <option value="constant">Fill with "Unknown"</option>
+                </select>
               </div>
+            </div>
+          </div><!-- /fillSubOptions -->
+          <button type="button" class="btn btn-outline btn-sm section-apply-btn" data-section-name="Missing Values">Apply Missing Values</button>
+
+        </div><!-- /group 2 -->
+
+        <!-- ── GROUP 3: Data Type Conversion ── -->
+        <div class="opt-group" id="dataTypesGroup">
+          <div class="opt-group-label">🔄 Data Type Conversion</div>
+
+          <!-- Auto convert -->
+          <div class="opt-item">
+            <div class="opt-toggle-col">
+              <label class="toggle">
+                <input type="hidden" name="convert_dtypes" value="0">
+                <input type="checkbox" name="convert_dtypes" value="1">
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              </label>
+            </div>
+            <div class="opt-info">
+              <div class="opt-header">
+                <span class="opt-name">Auto-Convert Data Types</span>
+                <span class="badge badge-green">Recommended</span>
+              </div>
+              <div class="opt-desc">Safely converts text columns that clearly contain numbers into numeric columns. It does not automatically convert dates.</div>
+              <div class="opt-why">💡 Use this before numeric missing-value filling, outlier preview, sorting, statistics, or ML. Messy columns stay unchanged unless you choose a manual type below.</div>
             </div>
           </div>
 
-          <div style="margin-top:8px;font-size:13px;color:#444;padding-top:8px;">
-            {% if cleaned.report.data_quality_before is not none and cleaned.report.data_quality_after is not none %}
-              Quality improved by <strong>{{ cleaned.report.dq_improvement }}</strong> points.
-            {% else %}
-              Data Quality Score not available for this run.
+          <!-- Manual dtype override -->
+          <div class="opt-item opt-item-block">
+            <div class="opt-info">
+              <div class="opt-header">
+                <span class="opt-name">Manual Column Type Conversion</span>
+                <span class="badge badge-blue">Optional</span>
+              </div>
+              <div class="opt-desc">Choose a specific type only for columns you want to convert yourself. Leave as <strong>No manual conversion</strong> when you want the column untouched by this table.</div>
+              <div class="opt-why">💡 Numeric and Datetime conversions use pandas coercion: invalid existing values become missing. Use this deliberately for dates, scores, prices, flags, or columns auto-detection missed.</div>
+              <div class="dtype-table">
+                <div class="dtype-table-header">
+                  <span>Column</span>
+                  <span>Current Type</span>
+                  <span>Convert To</span>
+                </div>
+                <div class="dtype-table-body">
+                  {% for col, dtype in analysis.dtypes.items() %}
+                  <div class="dtype-row">
+                    <span class="dtype-col-name" title="{{ col }}">{{ col }}</span>
+                    <span class="dtype-current">{{ dtype }}</span>
+                    <select name="dtype_map[{{ col }}]" class="dtype-select">
+                      <option value="auto" selected>No manual conversion</option>
+                      <option value="numeric">Numeric</option>
+                      <option value="datetime">Datetime</option>
+                      <option value="string">String / Text</option>
+                      <option value="category">Category</option>
+                      <option value="bool">Boolean (true/false)</option>
+                    </select>
+                  </div>
+                  {% endfor %}
+                </div>
+              </div>
+            </div>
+          </div>
+          <button type="button" class="btn btn-outline btn-sm section-apply-btn" data-section-name="Data Types">Apply Data Types</button>
+
+        </div><!-- /group 3 -->
+
+        <!-- ── GROUP 4: Outlier Detection ── -->
+        <div class="opt-group" id="outlierGroup">
+          <div class="opt-group-label">📉 Outlier Detection</div>
+
+          <div class="opt-item opt-item-block">
+            <div class="opt-info">
+              <div class="opt-header">
+                <span class="opt-name">Interactive Outlier Removal</span>
+                <span class="badge badge-blue">Optional</span>
+              </div>
+              <div class="opt-desc">Uses the <strong>IQR (Interquartile Range)</strong> method to find statistical outliers in numeric columns. You review the detected rows and select exactly which ones to remove before cleaning.</div>
+              <div class="opt-why">💡 Outliers skew averages and can break ML models. Always <strong>preview first</strong> — some "outliers" may be valid data. IQR multiplier = 1.5 (standard Tukey fence).</div>
+
+              <div class="outlier-controls">
+                <button type="button" id="previewOutliersBtn" class="btn btn-outline">
+                  🔍 Preview Outliers
+                </button>
+                <span id="outlierStatus" class="outlier-status"></span>
+              </div>
+
+              <!-- Outlier Preview Table -->
+              <div id="outlierPreviewSection" style="display:none;margin-top:12px;">
+                <div class="outlier-box">
+                  <div class="outlier-box-header">
+                    <span>⚠️ Detected Outliers — tick rows to remove them, then click Clean Data</span>
+                    <label class="check-all-label">
+                      <input type="checkbox" id="selectAllOutliers"> Select All
+                    </label>
+                  </div>
+                  <div class="outlier-table-wrap">
+                    <table class="data-table">
+                      <thead>
+                        <tr>
+                          <th style="width:36px;"></th>
+                          <th>Original Row #</th>
+                          <th>Column</th>
+                          <th>Outlier Value</th>
+                          <th>Sample Context</th>
+                        </tr>
+                      </thead>
+                      <tbody id="outlierTableBody"></tbody>
+                    </table>
+                  </div>
+                  <div class="outlier-info" id="outlierCountInfo"></div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+          <button type="button" class="btn btn-outline btn-sm section-apply-btn" data-section-name="Outliers">Apply Outlier Choices</button>
+        </div><!-- /group 4 -->
+
+        <!-- ── GROUP 5: Advanced ── -->
+        <div class="opt-group" id="advancedGroup">
+          <div class="opt-group-label">⚡ Advanced Options</div>
+
+          <!-- Label Encoding — value="1" so _bool_from_form can parse it correctly -->
+          <div class="opt-item">
+            <div class="opt-toggle-col">
+              <label class="toggle">
+                <input type="hidden" name="encode_categoricals" value="0">
+                <input type="checkbox" name="encode_categoricals" value="1" id="encodeToggle">
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              </label>
+            </div>
+            <div class="opt-info">
+              <div class="opt-header">
+                <span class="opt-name">Label Encode Categorical Columns</span>
+                <span class="badge badge-blue">Optional</span>
+              </div>
+              <div class="opt-desc">Converts text category values into integers: <code>"Red"→0</code>, <code>"Blue"→1</code>, <code>"Green"→2</code>, etc.</div>
+              <div class="opt-why">💡 Required for most ML algorithms that only accept numeric input. <strong>Skip this</strong> if you need human-readable output for analysis or reporting.</div>
+            </div>
+          </div>
+          <button type="button" class="btn btn-outline btn-sm section-apply-btn" data-section-name="Advanced Options">Apply Advanced Options</button>
+
+        </div><!-- /group 5 -->
+
+      </div><!-- /options-body -->
+
+      <div class="clean-action-bar">
+        <button type="submit" class="btn btn-accent btn-lg">🧹 Clean Data</button>
+        <span class="clean-hint">Use section apply buttons for live preview. Clean Data creates the final downloadable file.</span>
+      </div>
+    </div><!-- /options-card -->
+    </aside>
+
+    <section class="live-preview-card dataset-slide" id="progressDatasetSlide">
+      <div class="live-preview-header">
+        <div>
+          <h2 class="live-preview-title">Cleaning Work Progress</h2>
+          <p class="live-preview-subtitle">Use Apply buttons to update this working dataset step by step. The original uploaded dataset stays unchanged above.</p>
+        </div>
+        <div class="live-preview-actions">
+          <button type="button" id="livePreviewBtn" class="btn btn-outline btn-sm">Preview Current Section</button>
+          <button type="button" id="undoPreviewBtn" class="btn btn-ghost btn-sm" disabled>Undo</button>
+        </div>
+      </div>
+
+      <div class="live-metrics" id="liveMetrics">
+        <span>Rows: {{ analysis.shape[0] }}</span>
+        <span>Columns: {{ analysis.shape[1] }}</span>
+        <span>Missing: {{ analysis.missing_count }}</span>
+      </div>
+
+      <div class="live-preview-body">
+        <div class="table-scroll">
+          <table class="data-table" id="livePreviewTable">
+            <thead>
+              {% if analysis.preview and analysis.preview | length > 0 %}
+              <tr>
+                {% for col in analysis.preview[0].keys() %}<th>{{ col }}</th>{% endfor %}
+              </tr>
+              {% endif %}
+            </thead>
+            <tbody>
+              {% if analysis.preview and analysis.preview | length > 0 %}
+              {% for row in analysis.preview[:25] %}
+              <tr>
+                {% for val in row.values() %}
+                  <td title="{{ val }}">{{ val if val is not none else '' }}</td>
+                {% endfor %}
+              </tr>
+              {% endfor %}
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="live-log-panel">
+        <div class="live-log-title">What This Preview Does</div>
+        <div id="liveActionLog" class="live-action-log">
+          <div class="live-log-empty">No preview run yet. Change an option or click Preview Current Section.</div>
+        </div>
+      </div>
+      <div class="live-code-panel">
+        <div class="live-log-title">Pandas Code Applied</div>
+        <pre id="liveCodeLog" class="live-code-log"># Apply a section to see the pandas-style code used.</pre>
+      </div>
+    </section>
+    </div>
+  </form>
+
+</section><!-- /analysis -->
+{% endif %}
+
+
+{% if cleaned %}
+<!-- ══════════════════════════════════════════
+     RESULTS SECTION
+══════════════════════════════════════════ -->
+<section class="section" id="results">
+
+  <div class="results-card">
+    <div class="results-header">
+      <span class="results-icon">✅</span>
+      <div>
+        <h2 class="results-title">Cleaning Complete!</h2>
+        <p class="results-sub">Review the step-by-step log below, then download your clean file.</p>
+      </div>
+    </div>
+
+    <div class="results-body">
+
+      <!-- Cleaned Data Preview -->
+      {% if cleaned.report.preview and cleaned.report.preview | length > 0 %}
+      <div class="preview-card preview-card-primary">
+        <div class="preview-card-header">
+          <h3 class="preview-title">Cleaned Dataset Preview</h3>
+          <span class="preview-meta">{{ cleaned.report.rows_after }} rows × {{ cleaned.report.cleaned_shape[1] }} columns</span>
+        </div>
+        <div class="preview-card-body">
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  {% for col in cleaned.report.preview[0].keys() %}<th>{{ col }}</th>{% endfor %}
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in cleaned.report.preview %}
+                <tr>
+                  {% for val in row.values() %}
+                    <td title="{{ val }}">{{ val if val is not none else '' }}</td>
+                  {% endfor %}
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Metrics Grid -->
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <div class="metric-val">{{ cleaned.report.rows_processed }}</div>
+          <div class="metric-label">Original Rows</div>
+        </div>
+        <div class="metric-card metric-green">
+          <div class="metric-val">{{ cleaned.report.rows_after }}</div>
+          <div class="metric-label">Rows After Cleaning</div>
+        </div>
+        <div class="metric-card metric-orange">
+          <div class="metric-val">{{ cleaned.report.duplicates_removed }}</div>
+          <div class="metric-label">Duplicates Removed</div>
+        </div>
+        <div class="metric-card metric-orange">
+          <div class="metric-val">{{ cleaned.report.outliers_removed }}</div>
+          <div class="metric-label">Outlier Rows Removed</div>
+        </div>
+        <div class="metric-card metric-green">
+          <div class="metric-val">{{ cleaned.report.filled_cells }}</div>
+          <div class="metric-label">Missing Cells Filled</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-val">{{ cleaned.report.empty_columns_removed }}</div>
+          <div class="metric-label">Empty Cols Removed</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-val">{{ cleaned.report.columns_renamed }}</div>
+          <div class="metric-label">Columns Renamed</div>
+        </div>
+        <div class="metric-card metric-green">
+          <div class="metric-val">{{ cleaned.report.cleaned_shape[1] }}</div>
+          <div class="metric-label">Final Column Count</div>
+        </div>
+      </div>
+
+      <!-- Cleaning Completeness + Data Quality -->
+      {% if cleaned.report.data_quality_before is not none %}
+      <div class="dq-section">
+        <div class="dq-scores">
+          <div class="dq-score-item">
+            <div class="dq-num" style="color:var(--success);">
+              {{ cleaned.report.cleaning_completeness_score | default(100) }}
+            </div>
+            <div class="dq-lbl">Cleaning Completeness</div>
+          </div>
+          <div class="dq-arrow">|</div>
+          <div class="dq-score-item">
+            <div class="dq-num" style="color:var(--warning);">{{ cleaned.report.data_quality_before }}</div>
+            <div class="dq-lbl">Data Quality Before</div>
+          </div>
+          <div class="dq-arrow">→</div>
+          <div class="dq-score-item">
+            <div class="dq-num" style="color:var(--success);">{{ cleaned.report.data_quality_after }}</div>
+            <div class="dq-lbl">Data Quality After</div>
+          </div>
+          <div class="dq-score-item">
+            <div class="dq-num dq-improvement"
+                 data-val="{{ cleaned.report.dq_improvement if cleaned.report.dq_improvement is not none else '' }}">
+              {% if cleaned.report.dq_improvement is not none %}
+                {% if cleaned.report.dq_improvement >= 0 %}+{{ cleaned.report.dq_improvement }}{% else %}{{ cleaned.report.dq_improvement }}{% endif %}
+              {% else %}N/A{% endif %}
+            </div>
+            <div class="dq-lbl">Quality Change</div>
+          </div>
+        </div>
+        <div class="dq-bar-section">
+          <div class="dq-bar-label">Practical Data Quality Score</div>
+          <div class="dq-bar-outer">
+            <div class="dq-bar-inner"
+                 data-score="{{ cleaned.report.data_quality_after if cleaned.report.data_quality_after is not none else 0 }}">
+            </div>
+          </div>
+          <div class="dq-bar-val">
+            {{ cleaned.report.data_quality_after if cleaned.report.data_quality_after is not none else 'N/A' }} / 100
+          </div>
+          <div class="dq-note">
+            Cleaning completeness means the selected actions finished. Data quality still checks remaining review risks like Unknown values, placeholder-heavy rows, and messy numeric-like text.
+          </div>
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- ── Cleaning Log ── -->
+      <div class="log-section">
+        <h3 class="log-title">📋 What Was Done — Step by Step</h3>
+        <div class="log-list">
+
+          {% for op in cleaned.report.operations %}
+
+            {# ── replace_placeholders ── #}
+            {% if op.action == 'replace_placeholders' %}
+            <div class="log-item log-info">
+              <span class="log-ico">🔄</span>
+              <div class="log-body">
+                <strong>Replaced placeholder values with proper NaN</strong>
+                <div class="log-detail">Converted values like N/A, NULL, --, ?, empty strings to proper missing values so they are handled correctly in subsequent steps.</div>
+              </div>
+            </div>
+
+            {# ── rename_columns ── #}
+            {% elif op.action == 'rename_columns' %}
+              {% if op.count | default(0) > 0 %}
+              <div class="log-item log-info">
+                <span class="log-ico">🏷️</span>
+                <div class="log-body">
+                  <strong>Renamed {{ op.count }} column name(s) — normalised to lowercase with underscores</strong>
+                  <div class="log-detail">
+                    {% for old, new in op.renamed_map.items() %}
+                      <span class="mono">"{{ old }}" → "{{ new }}"</span>{% if not loop.last %}, {% endif %}
+                    {% endfor %}
+                  </div>
+                </div>
+              </div>
+              {% endif %}
+
+            {# ── trim_whitespace ── #}
+            {% elif op.action == 'trim_whitespace' %}
+            <div class="log-item log-success">
+              <span class="log-ico">✂️</span>
+              <div class="log-body">
+                <strong>Trimmed whitespace in {{ op.columns_processed | list | length }} text column(s)</strong>
+                <div class="log-detail">Stripped leading/trailing spaces from: <span class="mono">{{ op.columns_processed | join(', ') }}</span></div>
+              </div>
+            </div>
+
+            {# ── convert_dtypes (auto) ── #}
+            {% elif op.action == 'convert_dtypes' %}
+              {% if op.changes | default([]) | length > 0 %}
+              <div class="log-item log-success">
+                <span class="log-ico">🔢</span>
+                <div class="log-body">
+                  <strong>Auto-converted {{ op.changes | length }} column(s) to correct data types</strong>
+                  <div class="log-detail">
+                    {% for ch in op.changes %}
+                      <span class="mono">{{ ch.column }} → {{ ch.new_dtype }}</span>{% if not loop.last %},  {% endif %}
+                    {% endfor %}
+                  </div>
+                </div>
+              </div>
+              {% else %}
+              <div class="log-item log-muted">
+                <span class="log-ico">✅</span>
+                <div class="log-body"><strong>Auto type conversion: no changes needed</strong></div>
+              </div>
+              {% endif %}
+
+            {# ── manual_convert_dtypes ── #}
+            {% elif op.action == 'manual_convert_dtypes' %}
+              {% if op.changes | default({}) | length > 0 %}
+              <div class="log-item log-success">
+                <span class="log-ico">🔧</span>
+                <div class="log-body">
+                  <strong>Applied {{ op.changes | length }} manual column type conversion(s)</strong>
+                  <div class="log-detail">
+                    {% for column, item in op.changes.items() %}
+                      <span class="mono">
+                        {{ column }}: {{ item.from }} → {{ item.requested | default(item.to) }}
+                        (result: {{ item.actual_dtype | default(item.to) }}, coerced: {{ item.coerced | default(0) }})
+                      </span>{% if not loop.last %},  {% endif %}
+                    {% endfor %}
+                  </div>
+                </div>
+              </div>
+              {% endif %}
+
+            {# ── manual_convert_dtypes_failed ── #}
+            {% elif op.action == 'manual_convert_dtypes_failed' %}
+            <div class="log-item log-error">
+              <span class="log-ico">❌</span>
+              <div class="log-body">
+                <strong>Manual type conversion failed</strong>
+                <div class="log-detail">{{ op.error | default('Unknown error') }}</div>
+              </div>
+            </div>
+
+            {# ── drop_empty_columns ── #}
+            {% elif op.action == 'drop_empty_columns' %}
+              {% if op.count | default(0) > 0 %}
+              <div class="log-item log-warn">
+                <span class="log-ico">📭</span>
+                <div class="log-body">
+                  <strong>Removed {{ op.count }} fully empty column(s) — every cell was missing</strong>
+                  <div class="log-detail">Columns dropped: <span class="mono">{{ op.columns_dropped | join(', ') }}</span></div>
+                </div>
+              </div>
+              {% else %}
+              <div class="log-item log-muted">
+                <span class="log-ico">✅</span>
+                <div class="log-body"><strong>No fully empty columns found</strong></div>
+              </div>
+              {% endif %}
+
+            {# ── drop_constant_columns ── #}
+            {% elif op.action == 'drop_constant_columns' %}
+              {% if op.count | default(0) > 0 %}
+              <div class="log-item log-warn">
+                <span class="log-ico">📊</span>
+                <div class="log-body">
+                  <strong>Removed {{ op.count }} constant column(s) — all values were identical</strong>
+                  <div class="log-detail">Columns dropped: <span class="mono">{{ op.columns_dropped | join(', ') }}</span></div>
+                </div>
+              </div>
+              {% endif %}
+
+            {# ── drop_selected_columns ── #}
+            {% elif op.action == 'drop_selected_columns' %}
+            <div class="log-item log-warn">
+              <span class="log-ico">🧾</span>
+              <div class="log-body">
+                <strong>Dropped {{ op.count }} reviewed column(s)</strong>
+                <div class="log-detail">Columns dropped: <span class="mono">{{ op.columns_dropped | join(', ') }}</span></div>
+              </div>
+            </div>
+
+            {# ── drop_duplicates ── #}
+            {% elif op.action == 'drop_duplicates' %}
+              {% if op.removed_rows | default(0) > 0 %}
+              <div class="log-item log-warn">
+                <span class="log-ico">🗑️</span>
+                <div class="log-body">
+                  <strong>Removed {{ op.removed_rows }} duplicate row(s)</strong>
+                  <div class="log-detail">Rows that were 100% identical to another row have been eliminated.</div>
+                </div>
+              </div>
+              {% else %}
+              <div class="log-item log-muted">
+                <span class="log-ico">✅</span>
+                <div class="log-body"><strong>No duplicate rows found</strong></div>
+              </div>
+              {% endif %}
+
+            {# ── manual_outlier_removal ── #}
+            {% elif op.action == 'manual_outlier_removal' %}
+            <div class="log-item log-warn">
+              <span class="log-ico">📉</span>
+              <div class="log-body">
+                <strong>Removed {{ op.rows_removed }} outlier row(s) — based on your selection</strong>
+                <div class="log-detail">
+                  Original row numbers removed: <span class="mono">{{ op.selected_row_numbers | default(op.valid_indices_dropped) | join(', ') }}</span>
+                </div>
+              </div>
+            </div>
+
+            {# ── automatic outlier_removal ── #}
+            {% elif op.action == 'outlier_removal' %}
+            <div class="log-item log-warn">
+              <span class="log-ico">📉</span>
+              <div class="log-body">
+                <strong>Auto-removed {{ op.removed_rows }} outlier row(s) using IQR method (multiplier = {{ op.multiplier }})</strong>
+              </div>
+            </div>
+
+            {# ── outlier_clip ── #}
+            {% elif op.action == 'outlier_clip' %}
+            <div class="log-item log-info">
+              <span class="log-ico">✂️</span>
+              <div class="log-body">
+                <strong>Clipped outlier values to IQR bounds (multiplier = {{ op.multiplier }})</strong>
+                <div class="log-detail">Extreme values were capped to the acceptable range rather than removing rows.</div>
+              </div>
+            </div>
+
+            {# ── drop_missing_rows ── #}
+            {% elif op.action == 'drop_missing_rows' %}
+            <div class="log-item log-warn">
+              <span class="log-ico">🗑️</span>
+              <div class="log-body">
+                <strong>Dropped {{ op.rows_dropped }} row(s) that contained missing values</strong>
+              </div>
+            </div>
+
+            {# ── manual_missing_cell_updates ── #}
+            {% elif op.action == 'manual_missing_cell_updates' %}
+            <div class="log-item log-info">
+              <span class="log-ico">🩹</span>
+              <div class="log-body">
+                <strong>Updated {{ op.count }} missing cell(s) from your typed values</strong>
+                <div class="log-detail">
+                  {% for update in op.updates %}
+                    <span class="mono">Row {{ update.row_number }}, {{ update.column }} = "{{ update.value }}"</span>{% if not loop.last %};  {% endif %}
+                  {% endfor %}
+                </div>
+              </div>
+            </div>
+
+            {# ── fill_numeric (new log entry from fixed cleaner.py) ── #}
+            {% elif op.action == 'fill_numeric' %}
+              {% if op.filled_cells | default(0) > 0 %}
+              <div class="log-item log-success">
+                <span class="log-ico">🔢</span>
+                <div class="log-body">
+                  <strong>Filled {{ op.filled_cells }} missing numeric cell(s) using <em>{{ op.strategy }}</em> strategy</strong>
+                </div>
+              </div>
+              {% endif %}
+
+            {# ── fill_categorical ── #}
+            {% elif op.action == 'fill_categorical' %}
+              {% if op.filled_cells | default(0) > 0 %}
+              <div class="log-item log-success">
+                <span class="log-ico">📝</span>
+                <div class="log-body">
+                  <strong>Filled {{ op.filled_cells }} missing text/category cell(s) using <em>{{ op.strategy }}</em> strategy</strong>
+                  {% if op.details %}
+                  <div class="log-detail">
+                    {% for col, info in op.details.items() %}
+                      {% if info.filled | default(0) > 0 %}
+                        <span class="mono">{{ col }}: {{ info.filled }} filled{% if info.value is defined %} with "{{ info.value }}"{% endif %}</span>{% if not loop.last %};  {% endif %}
+                      {% endif %}
+                    {% endfor %}
+                  </div>
+                  {% endif %}
+                </div>
+              </div>
+              {% endif %}
+
+            {# ── label_encode ── #}
+            {% elif op.action == 'label_encode' %}
+            <div class="log-item log-info">
+              <span class="log-ico">🏷️</span>
+              <div class="log-body">
+                <strong>Label-encoded {{ op.columns_encoded | length }} categorical column(s)</strong>
+                <div class="log-detail">Text categories converted to integers in: <span class="mono">{{ op.columns_encoded | join(', ') }}</span></div>
+              </div>
+            </div>
+
             {% endif %}
-          </div>
-        </div>
+          {% endfor %}
 
-        <div class="download-row" style="margin-top:8px;">
-          <a class="choose-btn" href="{{ url_for('download_cleaned', filename=cleaned.cleaned_filename) }}">⬇️ Download Cleaned CSV</a>
-          <a class="choose-btn secondary" href="{{ url_for('download_report', filename=cleaned.report_filename) }}">📄 Download Report</a>
-          <a class="choose-btn neutral" href="{{ url_for('index') }}">Upload Another File</a>
-        </div>
-      </section>
-    {% endif %}
-  </main>
+        </div><!-- /log-list -->
+      </div><!-- /log-section -->
 
-  <footer class="site-footer container">
-    <small class="muted">Developed by <span class="author">Yaswanth Himanshu</span></small>
-  </footer>
+      <!-- Downloads -->
+      <div class="download-bar">
+        <a class="btn btn-accent btn-lg"
+           href="{{ url_for('download_cleaned', filename=cleaned.cleaned_filename) }}">
+          ⬇️ Download Cleaned CSV
+        </a>
+        <a class="btn btn-outline"
+           href="{{ url_for('download_report', filename=cleaned.report_filename) }}">
+          📄 Download JSON Report
+        </a>
+        <a class="btn btn-ghost" href="{{ url_for('index') }}">
+          🔄 Upload Another File
+        </a>
+      </div>
 
-  <script src="{{ url_for('static', filename='script.js') }}"></script>
-  <script>
-    // small UI script: animate dq bar and color improvement
-    document.addEventListener('DOMContentLoaded', function () {
-      try {
-        const dqEl = document.querySelector('.dq-improvement');
-        const bar = document.querySelector('.dq-progress-bar');
-        if (dqEl) {
-          const raw = dqEl.getAttribute('data-dq');
-          const val = raw === '' ? null : Number(raw);
-          if (val === null || Number.isNaN(val)) {
-            dqEl.style.color = '#666';
-          } else if (val > 0) {
-            dqEl.style.color = '#16a34a';
-          } else if (val === 0) {
-            dqEl.style.color = '#666';
-          } else {
-            dqEl.style.color = '#dc2626';
-          }
-        }
-        if (bar) {
-          const w = Number(bar.getAttribute('data-after') || 0);
-          setTimeout(() => { bar.style.width = Math.max(0, Math.min(100, w)) + '%'; }, 80);
-        }
-      } catch (e) {
-        console.debug('dq-ui error', e);
-      }
-    });
-    
-    // Function to capture selected outlier rows before form submission
-    function captureSelectedOutliers() {
-      const outlierPreviewSection = document.getElementById('outlierPreviewSection');
-      if (outlierPreviewSection && outlierPreviewSection.style.display !== 'none') {
-        const selectedCheckboxes = document.querySelectorAll('.outlier-checkbox:checked');
-        
-        // Remove any existing selected_outlier_rows input
-        const existingInput = document.querySelector('input[name="selected_outlier_rows"]');
-        if (existingInput) {
-          existingInput.remove();
-        }
-        
-        if (selectedCheckboxes.length > 0) {
-          const selectedRows = Array.from(selectedCheckboxes).map(checkbox => 
-            parseInt(checkbox.getAttribute('data-row'))
-          );
-          
-          // Create a hidden input to store the selected rows
-          const input = document.createElement('input');
-          input.type = 'hidden';
-          input.name = 'selected_outlier_rows';
-          input.value = JSON.stringify(selectedRows);
-          document.getElementById('cleanForm').appendChild(input);
-          
-          console.log('Selected outlier rows added to form:', selectedRows);
-          console.log('Form now contains:', document.querySelector('input[name="selected_outlier_rows"]'));
-        } else {
-          console.log('No outlier rows selected, but will still submit form');
-          // Even if no rows selected, we should still allow form submission
-        }
-      } else {
-        console.log('Outlier preview section not visible, skipping outlier capture');
-      }
-      return true; // Allow form submission
+    </div><!-- /results-body -->
+  </div><!-- /results-card -->
+
+</section><!-- /results -->
+{% endif %}
+
+
+<!-- ══════════════════════════════════════════
+     FEATURES (only on landing / no file)
+══════════════════════════════════════════ -->
+{% if not analysis and not cleaned %}
+<section class="features-section">
+  <h2 class="features-heading">What inDataOut Does For You</h2>
+  <div class="features-grid">
+    <div class="feature-card">
+      <div class="feature-ico">🗑️</div>
+      <div class="feature-name">Remove Duplicates &amp; Empty Columns</div>
+      <div class="feature-desc">Automatically detects and removes duplicate rows and columns that are entirely empty or have a single repeated value across all rows.</div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-ico">🔢</div>
+      <div class="feature-name">Smart Missing Value Filling</div>
+      <div class="feature-desc">Fills empty numeric cells with Mean, Median, or Zero. Fills empty text cells with the most frequent value (Mode) or the string "Unknown".</div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-ico">🏷️</div>
+      <div class="feature-name">Data Type Conversion</div>
+      <div class="feature-desc">Auto-detects text columns that contain numbers and converts them. Manually override any column's type — Numeric, Datetime, String, Category, Boolean.</div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-ico">📉</div>
+      <div class="feature-name">Interactive Outlier Detection</div>
+      <div class="feature-desc">IQR-based statistical outlier detection with a full preview table. You inspect and select exactly which rows to remove — no surprises, full control.</div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-ico">📊</div>
+      <div class="feature-name">Data Quality Score</div>
+      <div class="feature-desc">Computes a 0–100 quality score before and after cleaning, based on missing values, duplicate rows, outliers, and constant columns.</div>
+    </div>
+    <div class="feature-card">
+      <div class="feature-ico">🔒</div>
+      <div class="feature-name">Privacy-First Processing</div>
+      <div class="feature-desc">Files live in isolated per-session folders on the server and are auto-deleted after download. Nothing is stored permanently.</div>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+</div><!-- /container -->
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    Developed by <strong>Yaswanth Himanshu</strong> &nbsp;&middot;&nbsp;
+    <a href="https://github.com/YaswanthHimanshu" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</footer>
+
+<script src="{{ url_for('static', filename='script.js') }}"></script>
+<script>
+/* ── Page-level init ── */
+document.addEventListener('DOMContentLoaded', function () {
+
+  /* Animate DQ progress bar */
+  var bar = document.querySelector('.dq-bar-inner');
+  if (bar) {
+    var score = parseFloat(bar.getAttribute('data-score') || '0');
+    setTimeout(function () {
+      bar.style.width = Math.max(0, Math.min(100, score)) + '%';
+    }, 120);
+  }
+
+  /* Colour the improvement number */
+  var imp = document.querySelector('.dq-improvement');
+  if (imp) {
+    var v = parseFloat(imp.getAttribute('data-val') || '0');
+    if (!isNaN(v)) {
+      imp.style.color = v > 0 ? 'var(--success)' : v < 0 ? 'var(--error)' : 'var(--text-muted)';
     }
-  </script>
+  }
+
+  /* Show/hide fill sub-options when strategy changes */
+  var stratSel = document.getElementById('missingStrategySelect');
+  var fillSub  = document.getElementById('fillSubOptions');
+  if (stratSel && fillSub) {
+    function syncFillVis() {
+      fillSub.style.display = stratSel.value === 'fill' ? '' : 'none';
+    }
+    stratSel.addEventListener('change', syncFillVis);
+    syncFillVis();
+  }
+
+  /* Smooth-scroll to the relevant section after page load */
+  var scrollTarget = document.querySelector('main').getAttribute('data-scroll-target');
+  if (scrollTarget) {
+    var targetEl = document.getElementById(scrollTarget);
+    if (targetEl) targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+});
+
+/* ── Called by clean form onsubmit ── */
+function onCleanSubmit(event) {
+  if (window.indataoutPrepareAppliedControls) {
+    window.indataoutPrepareAppliedControls();
+  }
+
+  /* 1. Capture selected outlier rows (single source of truth) */
+  var existing = document.querySelector('input[name="selected_outlier_rows"]');
+  if (existing) existing.remove();
+
+  var section = document.getElementById('outlierPreviewSection');
+  if (section && section.style.display !== 'none') {
+    var checked = Array.from(document.querySelectorAll('.outlier-checkbox:checked'))
+      .map(function (cb) { return parseInt(cb.dataset.row, 10); })
+      .filter(function (n) { return !isNaN(n); });
+    if (checked.length > 0) {
+      var inp = document.createElement('input');
+      inp.type  = 'hidden';
+      inp.name  = 'selected_outlier_rows';
+      inp.value = JSON.stringify(checked);
+      document.getElementById('cleanForm').appendChild(inp);
+    }
+  }
+
+  /* 2. Show loading overlay */
+  var overlay = document.getElementById('loadingOverlay');
+  var msg     = document.getElementById('loadingMsg');
+  if (overlay) overlay.classList.add('active');
+  if (msg)     msg.textContent = 'Cleaning your data — this may take a moment…';
+
+  return true;
+}
+</script>
 </body>
 </html>
