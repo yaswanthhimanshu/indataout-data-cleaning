@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <title>{{ project.name }} — inDataOut</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --brand:      #f97316;
+      --brand-dark: #ea6c0a;
+      --bg:         #f8f8f7;
+      --surface:    #ffffff;
+      --border:     #e8e7e3;
+      --border-2:   #f0efeb;
+      --text-1:     #1a1a18;
+      --text-2:     #6b6b67;
+      --text-3:     #a0a09c;
+      --success-bg: #dcfce7; --success-fg: #15803d;
+      --active-bg:  #dbeafe; --active-fg:  #1d4ed8;
+      --radius:     12px;
+      --shadow-sm:  0 1px 3px rgba(0,0,0,.06);
+      --shadow-md:  0 4px 16px rgba(0,0,0,.08);
+    }
+
+    body {
+      font-family: 'DM Sans', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text-1);
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Nav ── */
+    .nav {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      height: 58px;
+      display: flex;
+      align-items: center;
+      padding: 0 32px;
+      gap: 0;
+      position: sticky;
+      top: 0;
+      z-index: 50;
+    }
+    .nav-brand {
+      font-weight: 700; font-size: 17px;
+      color: var(--text-1); text-decoration: none;
+      display: flex; align-items: center; gap: 8px;
+      margin-right: 24px;
+    }
+    .nav-brand-icon {
+      width: 32px; height: 32px;
+      background: var(--brand);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px;
+    }
+    .nav-links { display: flex; gap: 4px; flex: 1; }
+    .nav-link {
+      font-size: 14px; color: var(--text-2);
+      text-decoration: none; padding: 6px 12px;
+      border-radius: 8px; font-weight: 500; transition: all .15s;
+    }
+    .nav-link:hover { color: var(--text-1); background: var(--bg); }
+    .nav-cta {
+      background: var(--brand); color: #fff;
+      font-size: 14px; font-weight: 600;
+      padding: 7px 16px; border-radius: 8px;
+      text-decoration: none; transition: background .15s;
+    }
+    .nav-cta:hover { background: var(--brand-dark); }
+
+    /* ── Page ── */
+    .page { max-width: 1040px; margin: 0 auto; padding: 40px 24px 80px; }
+
+    /* ── Breadcrumb ── */
+    .breadcrumb { font-size: 13px; color: var(--text-3); margin-bottom: 28px; display: flex; align-items: center; gap: 6px; }
+    .breadcrumb a { color: var(--text-2); text-decoration: none; }
+    .breadcrumb a:hover { color: var(--text-1); }
+    .breadcrumb-sep { color: var(--text-3); }
+
+    /* ── Flash ── */
+    .flash { background: #fef3c7; border: 1px solid #fcd34d; border-radius: 10px; padding: 13px 18px; font-size: 14px; margin-bottom: 24px; }
+
+    /* ── Page header ── */
+    .page-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 20px;
+      margin-bottom: 32px;
+    }
+    .header-left { flex: 1; min-width: 0; }
+
+    /* Editable title */
+    .title-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .page-title {
+      font-size: 26px; font-weight: 700; letter-spacing: -.5px;
+      line-height: 1.2;
+    }
+    .title-edit-btn {
+      background: none; border: none; cursor: pointer;
+      color: var(--text-3); font-size: 15px; padding: 2px 4px;
+      border-radius: 4px; transition: color .15s;
+    }
+    .title-edit-btn:hover { color: var(--brand); }
+    .title-input-wrap { display: none; margin-bottom: 8px; }
+    .title-input {
+      font-size: 22px; font-weight: 700; font-family: inherit;
+      border: 2px solid var(--brand); border-radius: 8px;
+      padding: 6px 12px; outline: none; color: var(--text-1);
+      width: 100%; max-width: 480px;
+    }
+    .title-save-hint { font-size: 12px; color: var(--text-3); margin-top: 4px; }
+
+    .page-meta { font-size: 13px; color: var(--text-2); display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+    .page-meta strong { color: var(--text-1); }
+    .save-indicator { font-size: 12px; color: var(--success-fg); display: none; }
+    .save-indicator.show { display: inline; }
+
+    .status-badge {
+      display: inline-flex; align-items: center;
+      font-size: 12px; font-weight: 600;
+      padding: 4px 11px; border-radius: 20px;
+      letter-spacing: .2px;
+    }
+    .badge-active   { background: var(--active-bg);  color: var(--active-fg); }
+    .badge-cleaned  { background: var(--success-bg); color: var(--success-fg); }
+    .badge-archived { background: var(--bg); color: var(--text-2); border: 1px solid var(--border); }
+
+    /* ── Header right: action buttons ── */
+    .header-actions { display: flex; gap: 8px; align-items: flex-start; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+
+    .btn-resume {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--brand); color: #fff;
+      font-size: 14px; font-weight: 700;
+      padding: 9px 18px; border-radius: 9px;
+      text-decoration: none; border: none; cursor: pointer;
+      transition: background .15s; white-space: nowrap;
+      box-shadow: 0 2px 8px rgba(249,115,22,.3);
+    }
+    .btn-resume:hover { background: var(--brand-dark); }
+
+    .btn-ghost {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: transparent; color: var(--text-2);
+      font-size: 13px; font-weight: 500;
+      padding: 8px 14px; border-radius: 8px;
+      text-decoration: none; border: 1px solid var(--border);
+      cursor: pointer; transition: all .15s;
+    }
+    .btn-ghost:hover { background: var(--bg); color: var(--text-1); }
+
+    /* ── Two-column layout ── */
+    .layout { display: grid; grid-template-columns: 1fr 280px; gap: 24px; align-items: start; }
+    @media (max-width: 700px) { .layout { grid-template-columns: 1fr; } }
+
+    /* ── Section card ── */
+    .section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      margin-bottom: 20px;
+    }
+    .section-header {
+      padding: 15px 20px;
+      border-bottom: 1px solid var(--border-2);
+      font-size: 14px; font-weight: 600;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .section-header .count {
+      font-weight: 400; color: var(--text-3); font-size: 13px;
+    }
+
+    /* ── Notes card ── */
+    .notes-wrap { padding: 16px 20px; }
+    .notes-label { font-size: 12px; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 8px; }
+    .notes-textarea {
+      width: 100%; min-height: 90px;
+      font-size: 13.5px; font-family: inherit;
+      border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px 12px;
+      resize: vertical; outline: none;
+      color: var(--text-1); line-height: 1.6;
+      transition: border-color .15s;
+    }
+    .notes-textarea:focus { border-color: var(--brand); }
+    .notes-status { font-size: 12px; color: var(--text-3); margin-top: 5px; transition: color .3s; }
+    .notes-status.saved { color: var(--success-fg); }
+
+    /* ── Timeline ── */
+    .timeline-empty { padding: 32px 20px; text-align: center; color: var(--text-3); font-size: 14px; }
+    .tl-item {
+      display: flex; gap: 14px;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border-2);
+    }
+    .tl-item:last-child { border-bottom: none; }
+    .tl-dot-col { display: flex; flex-direction: column; align-items: center; gap: 0; padding-top: 3px; }
+    .tl-dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: #10b981; flex-shrink: 0;
+      box-shadow: 0 0 0 3px rgba(16,185,129,.15);
+    }
+    .tl-line { width: 2px; flex: 1; background: var(--border-2); margin-top: 4px; }
+    .tl-item:last-child .tl-line { display: none; }
+    .tl-content { flex: 1; min-width: 0; }
+    .tl-action { font-size: 14px; font-weight: 600; color: var(--text-1); }
+    .tl-time { font-size: 12px; color: var(--text-3); margin-top: 2px; }
+    .tl-stats { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .tl-stat {
+      font-size: 11px; color: var(--text-2);
+      background: var(--bg); padding: 2px 8px;
+      border-radius: 4px; border: 1px solid var(--border-2);
+    }
+
+    /* Feature-grouped change log */
+    .changelog-intro {
+      padding: 14px 20px;
+      color: var(--text-2);
+      font-size: 13px;
+      line-height: 1.55;
+      border-bottom: 1px solid var(--border-2);
+    }
+    .history-groups { display: flex; flex-direction: column; gap: 14px; padding: 16px; }
+    .history-group {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      background: var(--surface);
+      box-shadow: var(--shadow-sm);
+    }
+    .history-group-header {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 16px;
+      background: #1f2937;
+      border: 0;
+      cursor: pointer;
+      font-family: inherit;
+      text-align: left;
+    }
+    .history-toggle { color: #fff; font-size: 12px; width: 16px; }
+    .history-group-title { flex: 1; color: #fff; font-size: 14px; font-weight: 700; }
+    .history-group-count { color: #fff; font-size: 12px; font-weight: 700; }
+    .history-group-body { background: #fff; }
+    .history-group.collapsed .history-group-body { display: none; }
+    .history-action {
+      padding: 18px 18px 16px;
+      border-top: 1px solid var(--border-2);
+    }
+    .history-action:first-child { border-top: 0; }
+    .history-action-head {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 6px;
+    }
+    .history-action-number { font-size: 14px; font-weight: 800; }
+    .history-action-status { color: var(--success-fg); font-size: 12px; font-weight: 700; }
+    .history-action-status.is-undone { color: var(--text-3); }
+    .history-action-time { color: var(--text-3); font-size: 12px; }
+    .history-action-label { color: var(--text-2); font-size: 13px; line-height: 1.45; margin-bottom: 10px; }
+    .history-meta-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+    .history-meta {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--bg);
+      color: var(--text-2);
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .history-ba-wrap {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      margin-top: 8px;
+    }
+    .history-ba-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .history-ba-table th {
+      background: #f3f4f6;
+      color: #374151;
+      text-align: left;
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .history-ba-table td {
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border-2);
+      vertical-align: top;
+      word-break: break-word;
+    }
+    .history-ba-table tr:last-child td { border-bottom: 0; }
+    .history-before { background: #fff7ed; }
+    .history-after { background: #f0fdf4; }
+    .history-context { color: var(--text-3); font-size: 12px; width: 32%; }
+    .history-no-preview {
+      padding: 11px 12px;
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      color: var(--text-3);
+      font-size: 13px;
+      background: var(--bg);
+    }
+    .history-action-controls { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 13px; }
+    .history-subgroup { border-top: 1px solid var(--border); }
+    .history-subgroup-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 18px;
+      background: #f8fafc;
+      color: var(--text-2);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .history-subgroup-header span:last-child { color: var(--text-3); font-weight: 500; }
+    .history-subgroup-body .history-action { padding-left: 28px; }
+    .history-subgroup-empty { padding: 12px 22px; color: var(--text-3); font-size: 12px; font-style: italic; }
+    .history-control {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+      color: var(--text-2);
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 7px 12px;
+    }
+    .history-control:disabled { opacity: .68; cursor: not-allowed; }
+    .history-view-details {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text-1);
+      font-size: 12px;
+      font-weight: 700;
+      padding: 7px 12px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .history-detail-json {
+      display: none;
+      margin-top: 10px;
+      max-height: 260px;
+      overflow: auto;
+      background: #111827;
+      color: #e5e7eb;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 11px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    .history-detail-json.show { display: block; }
+
+    /* ── Versions ── */
+    .version-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 20px; border-bottom: 1px solid var(--border-2);
+      gap: 12px;
+    }
+    .version-row:last-child { border-bottom: none; }
+    .version-badge {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 28px; height: 28px; border-radius: 6px;
+      background: var(--active-bg); color: var(--active-fg);
+      font-size: 11px; font-weight: 700; flex-shrink: 0;
+    }
+    .version-info { flex: 1; min-width: 0; }
+    .version-label { font-size: 13px; font-weight: 600; }
+    .version-meta  { font-size: 12px; color: var(--text-3); margin-top: 1px; }
+
+    /* ── Info table (sidebar) ── */
+    .info-table { width: 100%; border-collapse: collapse; }
+    .info-table tr td { padding: 10px 18px; font-size: 13px; border-bottom: 1px solid var(--border-2); vertical-align: top; }
+    .info-table tr:last-child td { border-bottom: none; }
+    .info-label { color: var(--text-3); width: 45%; }
+    .info-value { color: var(--text-1); font-weight: 500; word-break: break-word; }
+
+    /* ── Delete button ── */
+    .delete-form { margin-top: 12px; }
+    .btn-delete {
+      width: 100%; padding: 8px; border-radius: 8px;
+      background: transparent; border: 1px solid #fca5a5;
+      color: #dc2626; font-size: 13px; cursor: pointer;
+      transition: all .15s; font-family: inherit;
+    }
+    .btn-delete:hover { background: #fef2f2; }
+  </style>
+</head>
+<body data-project-id="{{ project.id }}">
+
+<nav class="nav">
+  <a href="/" class="nav-brand">
+    <div class="nav-brand-icon">🧹</div>
+    inDataOut
+  </a>
+  <div class="nav-links">
+    <a href="/projects" class="nav-link">← My Projects</a>
+  </div>
+  <a href="/" class="nav-cta">⬆ Upload Dataset</a>
+</nav>
+
+<div class="page">
+
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}{% for msg in messages %}
+      <div class="flash">⚠️ {{ msg }}</div>
+    {% endfor %}{% endif %}
+  {% endwith %}
+
+  <div class="breadcrumb">
+    <a href="/projects">My Projects</a>
+    <span class="breadcrumb-sep">/</span>
+    <span>{{ project.name }}</span>
+  </div>
+
+  <!-- Page header -->
+  <div class="page-header">
+    <div class="header-left">
+      <!-- Editable title -->
+      <div class="title-row" id="titleDisplayRow">
+        <h1 class="page-title" id="titleText">{{ project.name }}</h1>
+        <button class="title-edit-btn" id="titleEditBtn" title="Rename project">✏️</button>
+        <span class="save-indicator" id="titleSaved">✓ Saved</span>
+      </div>
+      <div class="title-input-wrap" id="titleInputWrap">
+        <input type="text" class="title-input" id="titleInput"
+               value="{{ project.name }}" maxlength="255" placeholder="Project name…">
+        <div class="title-save-hint">Press Enter to save, Esc to cancel</div>
+      </div>
+
+      <div class="page-meta">
+        <span>File: <strong>{{ project.original_file }}</strong></span>
+        <span>Rows: <strong>{{ project.row_count or '—' }}</strong></span>
+        <span>Cols: <strong>{{ project.col_count or '—' }}</strong></span>
+        <span>Created: <strong>{{ project.created_at.strftime('%d %b %Y') if project.created_at else '—' }}</strong></span>
+        <span class="status-badge badge-{{ project.status }}">{{ project.status }}</span>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <a href="/projects/{{ project.id }}/resume" class="btn-resume">▶ Resume Project</a>
+      {% if project.file_path %}
+        <a href="/projects/{{ project.id }}/download/cleaned" class="btn-ghost">⬇ Download CSV</a>
+      {% endif %}
+      <a href="/" class="btn-ghost">⬆ New Upload</a>
+    </div>
+  </div>
+
+  <div class="layout">
+
+    <!-- Main column -->
+    <div>
+
+      <!-- Notes -->
+      <div class="section">
+        <div class="section-header">📝 Project Notes</div>
+        <div class="notes-wrap">
+          <div class="notes-label">Your notes</div>
+          <textarea class="notes-textarea" id="notesTextarea"
+                    placeholder="Add context, goals, data source info, or any notes about this project…">{{ project.notes or '' }}</textarea>
+          <div class="notes-status" id="notesStatus">Auto-saves as you type</div>
+        </div>
+      </div>
+
+      <!-- Change log -->
+      <div class="section">
+        <div class="section-header">
+          Change Log
+          <span class="count">{{ history|length }} action{{ 's' if history|length != 1 else '' }}</span>
+        </div>
+        {% macro history_action_card(action) %}
+          <div class="history-action">
+            <div class="history-action-head">
+              <span class="history-action-number">Action #{{ action.local_number }}</span>
+              <span class="history-action-status{% if action.status == 'Undone' %} is-undone{% endif %}">{{ action.status }}</span>
+              <span class="history-action-time">{{ action.applied_at.strftime('%d %b %Y · %H:%M') if action.applied_at else '' }}</span>
+            </div>
+            <div class="history-action-label">{{ action.label }}</div>
+            <div class="history-meta-row">
+              {% if action.operation %}<span class="history-meta">Operation: {{ action.operation.replace('_', ' ').title() }}</span>{% endif %}
+              {% if action.rows_before != action.rows_after %}<span class="history-meta">Rows {{ action.rows_before }} -> {{ action.rows_after }}</span>{% endif %}
+              {% if action.cells_changed %}<span class="history-meta">{{ action.cells_changed }} changes recorded</span>{% endif %}
+            </div>
+            {% if action.pairs %}
+              <div class="history-ba-wrap">
+                <table class="history-ba-table">
+                  <thead><tr><th>Before</th><th>After</th><th>Context</th></tr></thead>
+                  <tbody>
+                    {% for pair in action.pairs %}
+                      <tr><td class="history-before">{{ pair.before }}</td><td class="history-after">{{ pair.after }}</td><td class="history-context">{{ pair.context or '-' }}</td></tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% else %}
+              <div class="history-no-preview">This action has summary data only. Resume the project to use its available controls.</div>
+            {% endif %}
+            <div class="history-action-controls">
+              <button type="button" class="history-control" disabled title="Resume this project to change action status.">Undo</button>
+              <button type="button" class="history-control" disabled title="Resume this project to change action status.">Reapply</button>
+              <button type="button" class="history-view-details">View Full Changes</button>
+            </div>
+            <pre class="history-detail-json">{{ action.preview | tojson(indent=2) }}</pre>
+          </div>
+        {% endmacro %}
+        {% if grouped_history %}
+          <div class="changelog-intro">
+            Actions remain in their owning feature with persisted Before and After evidence. Resume this project to Undo or Reapply an action.
+          </div>
+          <div class="history-groups" id="projectHistoryGroups">
+            {% for group in grouped_history %}
+              <div class="history-group">
+                <button type="button" class="history-group-header">
+                  <span class="history-toggle">v</span>
+                  <span class="history-group-title">{{ group.label }}</span>
+                  <span class="history-group-count">{{ group.action_count }} action{{ 's' if group.action_count != 1 else '' }}</span>
+                </button>
+                <div class="history-group-body">
+                  {% for action in group.actions %}
+                    {{ history_action_card(action) }}
+                  {% endfor %}
+                  {% for subfeature in group.subfeatures %}
+                    <div class="history-subgroup">
+                      <div class="history-subgroup-header">
+                        <span>{{ subfeature.label }}</span>
+                        <span>{{ subfeature.actions|length }} action{{ 's' if subfeature.actions|length != 1 else '' }}</span>
+                      </div>
+                      <div class="history-subgroup-body">
+                        {% if subfeature.actions %}
+                          {% for action in subfeature.actions %}{{ history_action_card(action) }}{% endfor %}
+                        {% else %}
+                          <div class="history-subgroup-empty">No actions yet</div>
+                        {% endif %}
+                      </div>
+                    </div>
+                  {% endfor %}
+                  {% if not group.actions and not group.subfeatures %}<div class="history-subgroup-empty">No actions yet</div>{% endif %}
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </div>
+
+      <!-- Dataset versions -->
+      <div class="section">
+        <div class="section-header">
+          🗂 Dataset Versions
+          <span class="count">{{ versions|length }}</span>
+        </div>
+        {% if versions %}
+          {% for v in versions %}
+            <div class="version-row">
+              <div class="version-badge">v{{ v.version_no }}</div>
+              <div class="version-info">
+                <div class="version-label">{{ v.label or 'Snapshot' }}</div>
+                <div class="version-meta">
+                  {{ v.row_count }} rows · {{ v.col_count }} cols ·
+                  {{ v.created_at.strftime('%d %b %Y, %H:%M') if v.created_at else '' }}
+                </div>
+              </div>
+              <a href="{{ url_for('download_project_version', project_id=project.id, version_id=v.id) }}" class="btn-ghost" style="font-size:12px">⬇ Download</a>
+            </div>
+          {% endfor %}
+        {% else %}
+          <div class="timeline-empty">No versions saved yet. Click "Clean Data" to generate the first version.</div>
+        {% endif %}
+      </div>
+
+    </div>
+
+    <!-- Sidebar -->
+    <div>
+      <div class="section">
+        <div class="section-header">📊 Project Info</div>
+        <table class="info-table">
+          <tr><td class="info-label">Project ID</td><td class="info-value">#{{ project.id }}</td></tr>
+          <tr><td class="info-label">Status</td><td class="info-value">{{ project.status }}</td></tr>
+          <tr><td class="info-label">Original file</td><td class="info-value">{{ project.original_file }}</td></tr>
+          <tr><td class="info-label">Rows</td><td class="info-value">{{ project.row_count or '—' }}</td></tr>
+          <tr><td class="info-label">Columns</td><td class="info-value">{{ project.col_count or '—' }}</td></tr>
+          <tr><td class="info-label">Actions</td><td class="info-value">{{ history|length }}</td></tr>
+          <tr><td class="info-label">Versions</td><td class="info-value">{{ versions|length }}</td></tr>
+          <tr><td class="info-label">Created</td><td class="info-value">{{ project.created_at.strftime('%d %b %Y') if project.created_at else '—' }}</td></tr>
+          <tr><td class="info-label">Updated</td><td class="info-value">{{ project.updated_at.strftime('%d %b %Y') if project.updated_at else '—' }}</td></tr>
+        </table>
+      </div>
+
+      <div class="delete-form">
+        <form method="post" action="/projects/{{ project.id }}/delete"
+              onsubmit="return confirm('Delete this project record? This cannot be undone.')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit" class="btn-delete">🗑 Delete project record</button>
+        </form>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const PROJECT_ID = parseInt(document.body.dataset.projectId, 10);
+const CSRF_TOKEN = document.querySelector('meta[name="csrf-token"]')?.content || '';
+function csrfHeaders(extra) {
+  return Object.assign({ 'X-CSRF-Token': CSRF_TOKEN }, extra || {});
+}
+
+// ── Inline title editing ──────────────────────────────────────────────────
+const titleText      = document.getElementById('titleText');
+const titleEditBtn   = document.getElementById('titleEditBtn');
+const titleDisplayRow= document.getElementById('titleDisplayRow');
+const titleInputWrap = document.getElementById('titleInputWrap');
+const titleInput     = document.getElementById('titleInput');
+const titleSaved     = document.getElementById('titleSaved');
+
+function showTitleEdit() {
+  titleDisplayRow.style.display = 'none';
+  titleInputWrap.style.display = 'block';
+  titleInput.focus(); titleInput.select();
+}
+
+function hideTitleEdit(save) {
+  const newName = titleInput.value.trim();
+  if (save && newName) {
+    fetch(`/projects/${PROJECT_ID}/update_name`, {
+      method: 'POST',
+      headers: csrfHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ name: newName })
+    }).then(r => r.json()).then(d => {
+      if (d.ok) {
+        titleText.textContent = newName;
+        document.title = newName + ' — inDataOut';
+        titleSaved.classList.add('show');
+        setTimeout(() => titleSaved.classList.remove('show'), 2500);
+      }
+    }).catch(() => {});
+  }
+  titleInputWrap.style.display = 'none';
+  titleDisplayRow.style.display = 'flex';
+}
+
+titleEditBtn.addEventListener('click', showTitleEdit);
+titleText.addEventListener('dblclick', showTitleEdit);
+titleInput.addEventListener('blur', () => hideTitleEdit(true));
+titleInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); titleInput.blur(); }
+  if (e.key === 'Escape') { titleInput.value = titleText.textContent; hideTitleEdit(false); }
+});
+
+// ── Notes auto-save ───────────────────────────────────────────────────────
+const notesEl     = document.getElementById('notesTextarea');
+const notesStatus = document.getElementById('notesStatus');
+let notesTimer = null;
+
+notesEl.addEventListener('input', () => {
+  notesStatus.textContent = 'Saving…';
+  notesStatus.classList.remove('saved');
+  clearTimeout(notesTimer);
+  notesTimer = setTimeout(() => {
+    fetch(`/projects/${PROJECT_ID}/update_notes`, {
+      method: 'POST',
+      headers: csrfHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ notes: notesEl.value.trim() })
+    }).then(r => r.json()).then(d => {
+      notesStatus.textContent = d.ok ? '✓ Saved' : 'Save failed';
+      notesStatus.classList.toggle('saved', d.ok);
+      setTimeout(() => {
+        notesStatus.textContent = 'Auto-saves as you type';
+        notesStatus.classList.remove('saved');
+      }, 2500);
+    }).catch(() => {
+      notesStatus.textContent = 'Save failed';
+    });
+  }, 700);
+});
+
+// Feature-grouped change log controls
+document.querySelectorAll('.history-group-header').forEach(header => {
+  header.addEventListener('click', () => {
+    const group = header.closest('.history-group');
+    const wasCollapsed = group.classList.contains('collapsed');
+    document.querySelectorAll('.history-group').forEach(item => {
+      item.classList.add('collapsed');
+      const toggle = item.querySelector('.history-toggle');
+      if (toggle) toggle.textContent = '>';
+    });
+    if (wasCollapsed) {
+      group.classList.remove('collapsed');
+      const toggle = group.querySelector('.history-toggle');
+      if (toggle) toggle.textContent = 'v';
+    }
+  });
+});
+
+document.querySelectorAll('.history-view-details').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const card = btn.closest('.history-action');
+    const detail = card ? card.querySelector('.history-detail-json') : null;
+    if (!detail) return;
+    detail.classList.toggle('show');
+    btn.textContent = detail.classList.contains('show') ? 'Hide Full Changes' : 'View Full Changes';
+  });
+});
+</script>
+
+</body>
+</html>

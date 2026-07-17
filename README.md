@@ -1,328 +1,288 @@
-# inDataOut - Controlled Data Cleaning Workflow
+# inDataOut
 
-Live project: https://indataout-data-cleaning.onrender.com
+inDataOut is a local-first data-cleaning application. It accepts structured datasets, previews cleaning operations, applies approved changes to a server-side current dataset, records Before/After evidence, supports Undo/Reapply, calculates data-quality metrics, and exports cleaned results.
 
-inDataOut is a controlled data-cleaning workflow that helps users inspect, correct, and validate messy datasets before analysis or modeling.
+## What the Application Does
 
-I built this project because data cleaning is usually either too automatic or too manual. Fully automatic tools can over-clean data without showing what changed, while spreadsheet-only cleaning becomes hard to track as the dataset grows. inDataOut is designed to keep the user in control: every important cleaning decision can be reviewed, applied, logged, and undone before creating the final cleaned file.
+The app keeps the uploaded source file unchanged for the life of a project. Preview builds a temporary result. Apply commits an approved operation to the server-side current dataset and records one Change Log entry with operation metadata and Before/After evidence.
 
----
+The same current dataset is used for the editor, Change Log refreshes, Final Clean, CSV downloads, JSON reports, project versions, and Resume.
 
-## What I Built
+## Supported Input
 
-I built an interactive preprocessing workflow for messy tabular data. The workflow is delivered through a browser interface, but the main focus is the cleaning logic, user control, and validation process.
+Supported extensions are defined in `app.py`:
 
-The workflow has three main dataset views:
+- `.csv`
+- `.tsv`
+- `.txt`
+- `.xlsx`
+- `.xls`
+- `.json`
 
-- **Original Uploaded Dataset**: shows the untouched uploaded file.
-- **Dataset Editor**: lets the user manually edit visible cells and column names.
-- **Cleaning Work Progress**: shows the live working dataset after applied cleaning actions.
+The Flask upload limit is `100 MB` through `MAX_CONTENT_LENGTH`. Large files can still be slow or memory-heavy because several routes materialize full DataFrames.
 
-The main idea is that users should always understand what changed, why it changed, and whether the cleaned result still needs review.
+## User Workflow
 
----
+1. Upload a dataset.
+2. Inspect the initial preview, column summary, missing values, duplicate count, and quality metrics.
+3. Choose a cleaning operation.
+4. Configure the operation.
+5. Preview the proposed result.
+6. Apply the operation or cancel it.
+7. Inspect the Change Log entry and its Before/After evidence.
+8. Undo or reapply actions when needed.
+9. Use Dataset Editor or trusted custom code for manual changes.
+10. Final Clean the current version.
+11. Download the cleaned CSV and JSON report.
+12. Open Projects to view, download, delete, or Resume saved projects.
 
-## Why I Built It
+```mermaid
+flowchart LR
+    U["Upload dataset"] --> S["Immutable source file"]
+    S --> I["Inspect preview and metrics"]
+    I --> C["Configure operation"]
+    C --> P["Preview result"]
+    P -. "Cancel: no mutation" .-> C
+    P --> A["Apply"]
+    A --> H["History + manifest + current snapshot"]
+    H --> L["Change Log evidence"]
+    L --> R["Undo/Reapply by replay"]
+    R --> H
+    H --> E["Dataset Editor / Custom Code"]
+    E --> A
+    H --> F["Final Clean"]
+    F --> D["Cleaned CSV + JSON report"]
+    H --> PR["Projects / Resume"]
+    PR --> I
+```
 
-Most beginner data-cleaning workflows have a few problems:
+## Cleaning Operations
 
-- Users select cleaning options but cannot clearly see what changed.
-- Missing values may be filled without explaining which cells were affected.
-- Rows or columns can be removed without enough context.
-- A final "cleaned" score can look perfect even when the dataset still has review risks.
-- Users may accidentally apply options they did not mean to apply.
+### Whitespace Trimming
 
-This project solves those problems by making data cleaning visible and controlled. Users apply one feature or section at a time, then check the live progress dataset, the operation log, and the generated Pandas-style code before finalizing.
+The user selects trimming for text fields. The operation strips actual string values and leaves numbers, booleans, timestamps, objects, and nulls unchanged. Preview shows changed cells. Apply records old and new values.
 
----
+### Placeholder Replacement
 
-## Core Workflow
+The user explicitly enables placeholder replacement and supplies or accepts placeholder tokens. Matching values are converted to missing values. Preview shows counts and examples. Apply records replacement cells and metadata.
 
-1. **Upload a dataset**
-   - Supports CSV, Excel, JSON, TSV, and TXT files.
-   - Handles common encoding issues so messy CSV files can still load correctly.
+### Missing Values
 
-2. **Review the original data**
-   - The original uploaded preview stays unchanged.
-   - This gives the user a safe reference point while cleaning.
+The user chooses numeric and categorical strategies, selected columns, constants, or row dropping. The operation fills missing cells or removes rows according to the selected strategy. Preview shows affected rows/cells. Apply records fill values, affected rows, and row removals.
 
-3. **Choose a cleaning section**
-   - Data Integrity
-   - Missing Values
-   - Data Types
-   - Outliers
-   - Advanced Options
+### Duplicate Removal
 
-4. **Apply selected actions**
-   - Each feature has an Apply button.
-   - Options must be turned on or selected before applying.
-   - If the user clicks Apply without selecting the needed option, the workflow shows a toast warning.
+The user can remove exact duplicate rows or duplicates based on selected subset keys. Preview shows retained shape and removed rows. Apply records duplicate criteria and removed-row evidence.
 
-5. **Watch Cleaning Work Progress**
-   - The live working dataset updates after every Apply.
-   - Changed cells are highlighted.
-   - The log explains exactly what was changed, filled, removed, or skipped.
-   - Undo restores the previous preview and removes highlights.
+### Column Removal
 
-6. **Finalize**
-   - Clean Data uses the applied controls, not random toggles left on the page.
-   - The user downloads a cleaned CSV and a JSON cleaning report.
+The user can remove empty columns, constant columns, or selected columns. Preview shows before and after columns. Apply records removed columns and affected shape.
 
----
+### Column Rename and Normalization
 
-## Data Cleaning Features Implemented
+The user can rename columns or use normalization paths exposed by the UI. The operation validates resulting column names and rejects conflicting results where implemented. Preview shows old and new names. Apply records rename mappings.
 
-### 1. Original Dataset Preview
+### Data Type Conversion
 
-The original dataset preview shows the uploaded file before cleaning. I kept this separate from the cleaning preview so users can compare the original data with the working version.
+The user selects target dtypes such as numeric, integer, float, datetime, string, category, or boolean. Conversion metadata records requested dtype, resulting dtype, coercion count, rounding count where relevant, and failures. Preview and Apply use that metadata.
 
-Why it matters:
+### Outliers
 
-- Prevents confusion between original and cleaned data.
-- Helps users verify that the workflow is not silently changing the source view.
-- Gives a stable reference while applying multiple cleaning actions.
+The user detects IQR outlier candidates, reviews rows, and selects removal or clipping options where available. Preview shows row identity, displayed row number, column, value, and bounds. Apply records selected rows or clipped cells.
 
----
+### Label Encoding
 
-### 2. Dataset Editor
+The user enables categorical encoding. Missing values remain missing unless a missing category is explicitly selected. Preview shows encoded columns and mappings. Apply records deterministic category-to-integer mappings.
 
-The Dataset Editor lets users manually edit visible cells and column names. It also includes search controls for finding values by text, column, or row number.
+### Dataset Editor
 
-Why it matters:
+The user edits cells in the Dataset Editor. Saved edits go through the server Apply path. Apply records old and new cell values.
 
-- Some data issues cannot be fixed automatically, such as spelling mistakes, wrong values, or domain-specific errors.
-- Users need a way to manually correct visible problems before applying automated cleaning.
-- Column names should be editable because messy headers are common in real datasets.
+### Custom Code
 
----
+The user runs trusted local Pandas code. Preview shows output blocks and observed changes such as modified cells, added/removed rows, and added/removed columns. Apply records the code label, operation order, and observed structural/value changes.
 
-### 3. Missing Value Editor
+## Preview and Apply
 
-The Missing Value Editor shows rows that contain missing values and lets users type values directly into blank cells before applying fill or drop rules.
+Preview does not mutate the authoritative dataset. It returns a proposed result, metrics, preview rows, and operation metadata.
 
-Why it matters:
+Apply commits the operation through the backend. A successful Apply creates or updates:
 
-- Some missing values should be manually entered instead of filled with mean, median, mode, or "Unknown".
-- Users can decide which missing values deserve exact replacement.
-- The editor updates after Apply so stale missing cells do not keep showing after the working dataset changes.
+- the current server-side snapshot,
+- one persisted Change Log history row,
+- a manifest for replay and Before/After evidence,
+- quality metrics calculated from the committed DataFrame.
 
-Important behavior:
+If an operation makes no changes, the app avoids creating a misleading transformation entry unless the route intentionally records a no-op. Stale or invalid mutation requests are rejected where dataset-version checks are available.
 
-- Fully empty columns cannot be filled with mean or median because there are no values to calculate from.
-- The workflow reports those cases honestly instead of pretending they were filled.
-- For fully empty columns, the recommended action is to drop the column before filling remaining missing values.
+## Change Log
 
----
+The Change Log is rendered from server-provided history and operation metadata. A card can include:
 
-### 4. Cleaning Work Progress
+- action type and status,
+- Before/After shape,
+- affected rows, cells, or columns,
+- changed-cell old/new values,
+- removed or added rows,
+- removed or added columns,
+- rename mappings,
+- dtype or encoding metadata,
+- bounded previews when the full change list is too large.
 
-Cleaning Work Progress is the live spreadsheet that updates after each applied action.
+History status is persisted as `applied` or `undone`. Browser-rendered table data is not used as the source of truth for committed history.
 
-Implemented behavior:
+## Undo and Reapply
 
-- Shows the current working dataset.
-- Highlights updated cells.
-- Updates after each Apply.
-- Syncs with the Dataset Editor and Missing Value Editor.
-- Supports Undo for the previous preview state.
+Undo and Reapply rebuild from the immutable source and replay active actions in their original commit order. This preserves later overlapping actions. The app does not rely on direct browser-side reversal or a simple reverse patch as the authoritative result.
 
-Why it matters:
+Reapplying an older action restores it to its original ordered position and then replays the active action list.
 
-- Users can see cleaning results before final download.
-- Highlighting makes changed cells easier to notice.
-- Undo reduces fear of trying a cleaning option.
+## Dataset Editor
 
----
+The Dataset Editor shows a page or preview of the current dataset and supports manual cell edits. Saved edits are sent to the backend and committed like other actions. The server returns the updated row mapping, columns, preview data, and history entry.
 
-### 5. Apply-First Cleaning Decisions
+Paging exists for editor reads through `/api/editor-page`, but not every preview/export path is chunked. Very large datasets can still take longer to render or process.
 
-The workflow uses Apply buttons for individual features and sections. Final Clean Data uses the applied options rather than every visible form control.
+## Custom Code
 
-Why it matters:
+Custom code is restricted to trusted local use. It runs exactly as written against a DataFrame copy and may modify, filter, replace, add, or remove data. The app reports observed changes, but arbitrary code cannot always receive the same semantic explanation as built-in operations.
 
-- Users may turn on a toggle while exploring but forget to turn it off.
-- Without an Apply-first workflow, final cleaning could run actions the user did not intentionally confirm.
-- This design keeps the cleaning decision deliberate and user-controlled.
+Set `INDATAOUT_TRUSTED_LOCAL=0` before exposing the app beyond the local machine.
 
----
+## Data-Quality Score
 
-### 6. Data Integrity Tools
+The score is a heuristic. It is calculated from the authoritative DataFrame, does not modify data, and is not a guarantee that the dataset is correct. A valid cleaning operation is not guaranteed to increase the score.
 
-Implemented data integrity features:
+`data_quality_score()` and `data_quality_breakdown()` use the same canonical calculation in `cleaner.py`.
 
-- Remove duplicate rows.
-- Drop fully empty columns.
-- Review unnamed columns.
-- Drop constant columns.
-- Trim whitespace.
+The score starts at 100 and subtracts weighted component percentages:
 
-Why it matters:
+| Component | Weight | Formula Summary |
+| --- | ---: | --- |
+| Completeness | 0.25 | missing cells / total cells |
+| Duplicate-row rate | 0.15 | duplicate rows / total rows |
+| Placeholder rate | 0.15 | placeholder string cells / total cells |
+| Type-conformance issues | 0.15 | numeric-looking invalid values / checked values |
+| IQR outlier flag rate | 0.10 | IQR-flagged cells / numeric cells |
+| Constant-column observation | 0.05 | constant columns / total columns |
+| Row retention | 0.10 | rows removed compared with original |
+| Column retention | 0.05 | columns removed compared with original |
 
-- Duplicate rows can affect counts and averages.
-- Fully empty columns add no information.
-- Constant columns do not help analysis or modeling.
-- Whitespace can cause false mismatches during filtering, grouping, or joining.
+Nulls are not double-counted as placeholder strings. Row and column retention use the immutable original when it is available.
 
-Important distinction:
+## Final Clean and Downloads
 
-- A fully empty column is not treated as a constant column.
-- Empty columns and constant columns are handled separately because they mean different things.
+Final Clean uses the current authoritative DataFrame. It writes:
 
----
+- a versioned cleaned CSV, for example `cleaned_<source>_v0001_<timestamp>.csv`,
+- a JSON report for the same finalized DataFrame,
+- a dataset-version record for the project.
 
-### 7. Missing Value Handling
+The CSV is written through a temporary file and validated by reading it back before the route presents the result. CSV export does not preserve Excel formatting, formulas, workbook sheets, or original JSON structure.
 
-Implemented missing-value features:
+## Projects and Resume
 
-- Manual missing-cell entry.
-- Fill numeric values with mean, median, or zero.
-- Fill text/category values with mode or Unknown.
-- Drop rows with remaining missing values.
+Each upload creates a project with its own source file, history, manifests, snapshots, reports, and versions. Opening a project detail page shows project metadata, action history, and dataset versions.
 
-Why it matters:
+Resume restores the project into the active session and rebuilds the current dataset from the immutable source plus active ordered actions. If the original source file is missing, the project is treated as damaged instead of silently treating a cleaned file as the new source.
 
-- Different columns need different missing-value strategies.
-- Filling with mean is not always correct.
-- Dropping rows can remove useful data, so the user should decide deliberately.
-- The workflow logs what was filled, skipped, or left remaining.
+Project and version downloads are scoped by project/version identity.
 
----
+## System Architecture
 
-### 8. Data Type Conversion
+```mermaid
+flowchart TB
+    Browser["Browser interface\nHTML templates + static/script.js"]
+    Flask["Flask backend\napp.py"]
+    Cleaning["Cleaning engine\ncleaner.py"]
+    Quality["Canonical quality engine\ncleaner.py"]
+    Replay["Manifest/replay logic\nsnapshot_diff.py + app.py"]
+    DB["MySQL metadata/history\nprojects, cleaning_history, manifests, dataset_versions"]
+    Files["Source, snapshot, report, version files\nUPLOAD_FOLDER"]
+    Downloads["Project/version downloads"]
 
-Implemented data type tools:
+    Browser --> Flask
+    Flask --> Cleaning
+    Flask --> Quality
+    Flask --> Replay
+    Flask --> DB
+    Flask --> Files
+    Files --> Downloads
+    DB --> Flask
+```
 
-- Auto-convert safe numeric-looking columns.
-- Manually convert selected columns to numeric, datetime, string, category, or boolean.
-- Report conversion results and coercion behavior.
+## Data Lifecycle
 
-Why it matters:
+```text
+Upload
+  -> immutable source file
+  -> preview result
+  -> committed action
+  -> current snapshot + history row + manifest
+  -> replay from source and active history
+  -> Final Clean
+  -> versioned CSV + JSON report
+```
 
-- Messy datasets often store numbers as text.
-- Manual override is needed when automatic detection is wrong.
-- Invalid conversions can create missing values, so the workflow reports what happened instead of hiding it.
+## Correctness and Safety Behavior
 
----
+- Uploaded source files are preserved for project replay.
+- Preview does not commit data.
+- Apply is server-authoritative.
+- Change Log evidence comes from persisted history/manifest data.
+- No-op actions do not get described as successful transformations.
+- Undo/Reapply rebuilds from source and active ordered actions.
+- CSRF validation is applied to state-changing routes.
+- Download paths are validated and project scoped.
+- Custom code is trusted-local only.
+- Score and breakdown come from the same canonical calculation.
 
-### 9. Outlier Preview And Removal
+## Application Outputs
 
-The workflow detects potential outliers using the IQR method and lets the user select which detected rows to remove.
+Users receive:
 
-Why it matters:
+- dataset previews,
+- Before/After evidence,
+- Change Log history,
+- quality score and breakdown,
+- cleaned CSV files,
+- JSON cleaning reports,
+- saved project records,
+- immutable dataset-version records.
 
-- Outliers are not always bad data.
-- Automatically removing all outliers can over-clean a dataset.
-- Users should preview outlier rows and choose what to remove.
+## Tests
 
----
+Python compilation:
 
-### 10. Operation Log And Pandas-Style Code
+```powershell
+.\.venv\Scripts\python.exe -B -m py_compile app.py db.py cleaner.py snapshot_diff.py custom_code_runner.py setup_database.py desktop_launcher.py smoke_correctness_workflow.py tests\test_correctness_core.py tests\test_app_safety_systems.py tests\test_quality_canonical.py
+```
 
-Each applied action shows a log of what happened and a Pandas-style code explanation.
+Unit and integration tests:
 
-Examples of logged details:
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_correctness_core tests.test_app_safety_systems tests.test_quality_canonical
+```
 
-- Which columns were dropped.
-- Which uploaded rows were removed.
-- Which cells were filled.
-- Which rows and columns were edited.
-- Which numeric fills were skipped and why.
+JavaScript syntax check:
 
-Why it matters:
+```bash
+node --check static/script.js
+```
 
-- Cleaning should be explainable.
-- Users can learn what each cleaning action does.
-- The final report gives a record of the cleaning process.
+The tests cover core cleaning regressions, manifest/replay behavior, app safety routes, canonical quality scoring, CSRF error shape, paging responses, idempotent Apply behavior, and output/report consistency checks present in the current test files. They do not replace a full rendered browser workflow.
 
----
+## Known Limitations
 
-### 11. Data Quality And Cleaning Completeness
+- The app is local-first and does not include multi-user authentication.
+- Custom code executes trusted local Python.
+- Dependency versions are not pinned in `requirements.txt`.
+- Some preview/export paths still materialize full DataFrames.
+- Dataset Editor paging is not wired into every workflow surface.
+- CSV export can change representation for some dtypes, leading-zero identifiers, or very large IDs unless handled carefully before/after export.
+- Diagnostics and progress feedback exist, but there is not a complete durable background-job system for every long-running operation.
+- Browser automation is not documented as passing unless it is run separately in the current environment.
 
-The project separates two ideas:
+## Related Setup Documentation
 
-- **Cleaning Completeness**: whether selected cleaning actions finished successfully.
-- **Data Quality Score**: how much review risk remains in the dataset.
-
-Why it matters:
-
-- A cleaning action can finish successfully while the dataset still has issues.
-- A score should not pretend the data is perfect just because selected actions ran.
-- This makes the result more honest and useful.
-
----
-
-### 12. Temporary Session-Based Dataset Handling
-
-Each upload is stored in a separate temporary session folder.
-
-Implemented behavior:
-
-- Each user upload gets a random session folder.
-- Routes check the user's session before previewing, cleaning, or downloading files.
-- Original uploaded files are deleted after cleaned outputs are created.
-- Temporary folders are cleaned automatically.
-
-Why it matters:
-
-- Multiple users should not control each other's data.
-- Uploaded files should not stay permanently on the server.
-- Temporary storage works well for the upload-clean-download workflow.
-
----
-
-## What Makes This Workflow Different
-
-The main goal of inDataOut is not just cleaning data. The goal is controlled cleaning.
-
-The workflow avoids over-cleaning by:
-
-- Keeping the original dataset separate.
-- Requiring Apply actions before final cleaning.
-- Showing live progress.
-- Highlighting changed cells.
-- Logging exact changes.
-- Letting users undo preview changes.
-- Reporting skipped or impossible operations honestly.
-
-This makes the project useful for users who want to prepare data without losing track of what happened.
-
----
-
-## Implementation
-
-- **Data processing**: Pandas, NumPy
-- **Cleaning logic**: missing-value handling, duplicate checks, empty/constant column handling, outlier review, type conversion, quality scoring
-- **User workflow**: apply-first controls, live progress preview, operation log, undo, manual dataset correction
-- **Interface**: Flask, HTML, CSS, JavaScript
-- **Deployment**: Render, Gunicorn
-
----
-
-## Final Output
-
-After cleaning, users can download:
-
-- A cleaned CSV file.
-- A JSON report with cleaning operations, summary metrics, and preview data.
-
----
-
-## Future Improvements
-
-Possible future additions:
-
-- More advanced cell-level diff view.
-- Better pagination for very large datasets.
-- Saved cleaning recipes.
-- More visual charts for column-level data quality.
-- Stronger semantic validation for domain-specific datasets.
-
----
-
-## Developer
-
-Built by Yaswanth Himanshu.
-
-Live project: https://indataout-data-cleaning.onrender.com
-
-GitHub: https://github.com/YaswanthHimanshu
+See [SETUP.md](SETUP.md) for installation, configuration, database initialization, run commands, storage locations, logs, troubleshooting, and cleanup.

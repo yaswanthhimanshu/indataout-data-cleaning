@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <title>My Projects — inDataOut</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --brand:      #f97316;
+      --brand-dark: #ea6c0a;
+      --bg:         #f8f8f7;
+      --surface:    #ffffff;
+      --border:     #e8e7e3;
+      --border-2:   #f0efeb;
+      --text-1:     #1a1a18;
+      --text-2:     #6b6b67;
+      --text-3:     #a0a09c;
+      --success-bg: #dcfce7; --success-fg: #15803d;
+      --active-bg:  #dbeafe; --active-fg:  #1d4ed8;
+      --warn-bg:    #fef3c7; --warn-fg:    #b45309;
+      --radius:     12px;
+      --shadow-sm:  0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+      --shadow-md:  0 4px 16px rgba(0,0,0,.08);
+      --shadow-lg:  0 8px 32px rgba(0,0,0,.10);
+    }
+
+    body {
+      font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text-1);
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Nav ── */
+    .nav {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      height: 58px;
+      display: flex;
+      align-items: center;
+      padding: 0 32px;
+      gap: 0;
+      position: sticky;
+      top: 0;
+      z-index: 50;
+    }
+    .nav-brand {
+      font-weight: 700;
+      font-size: 17px;
+      color: var(--text-1);
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-right: 24px;
+    }
+    .nav-brand-icon {
+      width: 32px; height: 32px;
+      background: var(--brand);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px;
+    }
+    .nav-links { display: flex; gap: 4px; flex: 1; }
+    .nav-link {
+      font-size: 14px;
+      color: var(--text-2);
+      text-decoration: none;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-weight: 500;
+      transition: all .15s;
+    }
+    .nav-link:hover { color: var(--text-1); background: var(--bg); }
+    .nav-link.active { color: var(--text-1); background: var(--bg); }
+    .nav-cta {
+      background: var(--brand);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      padding: 7px 16px;
+      border-radius: 8px;
+      text-decoration: none;
+      transition: background .15s;
+    }
+    .nav-cta:hover { background: var(--brand-dark); }
+
+    /* ── Page ── */
+    .page { max-width: 1100px; margin: 0 auto; padding: 40px 24px 80px; }
+
+    .page-header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      margin-bottom: 36px;
+      gap: 16px;
+    }
+    .page-title { font-size: 28px; font-weight: 700; letter-spacing: -.5px; }
+    .page-sub   { font-size: 14px; color: var(--text-2); margin-top: 5px; }
+
+    .btn-new {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--text-1);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      padding: 9px 18px;
+      border-radius: 9px;
+      text-decoration: none;
+      border: none;
+      cursor: pointer;
+      transition: background .15s;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .btn-new:hover { background: #3a3a38; }
+
+    /* ── Flash ── */
+    .flash {
+      background: var(--warn-bg);
+      border: 1px solid #fcd34d;
+      border-radius: 10px;
+      padding: 13px 18px;
+      font-size: 14px;
+      margin-bottom: 24px;
+    }
+
+    /* ── Empty ── */
+    .empty {
+      text-align: center;
+      padding: 90px 24px;
+      color: var(--text-2);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+    }
+    .empty-icon { font-size: 52px; margin-bottom: 20px; }
+    .empty h2   { font-size: 20px; color: var(--text-1); font-weight: 600; margin-bottom: 10px; }
+    .empty p    { font-size: 14px; margin-bottom: 28px; max-width: 360px; margin-left: auto; margin-right: auto; }
+
+    /* ── Grid ── */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 20px;
+    }
+
+    /* ── Card ── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      display: flex;
+      flex-direction: column;
+      transition: box-shadow .2s, border-color .2s;
+      overflow: hidden;
+    }
+    .card:hover {
+      box-shadow: var(--shadow-md);
+      border-color: #d4d3cf;
+    }
+
+    .card-top {
+      padding: 20px 20px 16px;
+      flex: 1;
+    }
+
+    .card-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    /* Inline editable project name */
+    .project-name-wrap { flex: 1; min-width: 0; }
+    .project-name-display {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+    .project-name-display .name-text {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text-1);
+      line-height: 1.35;
+      word-break: break-word;
+    }
+    .edit-pencil {
+      color: var(--text-3);
+      font-size: 13px;
+      opacity: 0;
+      transition: opacity .15s;
+      flex-shrink: 0;
+    }
+    .project-name-display:hover .edit-pencil { opacity: 1; }
+    .name-input-wrap { display: none; }
+    .name-input-wrap input {
+      width: 100%;
+      font-size: 15px;
+      font-weight: 600;
+      font-family: inherit;
+      border: 1px solid var(--brand);
+      border-radius: 6px;
+      padding: 4px 8px;
+      outline: none;
+      color: var(--text-1);
+    }
+
+    .card-file { font-size: 12px; color: var(--text-3); margin-top: 3px; }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 9px;
+      border-radius: 20px;
+      white-space: nowrap;
+      flex-shrink: 0;
+      letter-spacing: .2px;
+    }
+    .badge-active   { background: var(--active-bg);  color: var(--active-fg); }
+    .badge-cleaned  { background: var(--success-bg); color: var(--success-fg); }
+    .badge-archived { background: var(--bg); color: var(--text-2); }
+
+    .card-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 16px;
+      margin-bottom: 12px;
+    }
+    .meta-pill {
+      font-size: 12px;
+      color: var(--text-2);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .meta-pill strong { color: var(--text-1); font-weight: 600; }
+
+    /* Notes preview */
+    .card-note {
+      font-size: 12.5px;
+      color: var(--text-2);
+      line-height: 1.55;
+      background: var(--bg);
+      border-radius: 7px;
+      padding: 8px 11px;
+      margin-bottom: 12px;
+      border: 1px solid var(--border-2);
+      cursor: pointer;
+      position: relative;
+    }
+    .card-note.empty-note { color: var(--text-3); font-style: italic; }
+    .card-note::after {
+      content: '✏️';
+      position: absolute;
+      right: 8px;
+      top: 7px;
+      font-size: 11px;
+      opacity: 0;
+      transition: opacity .15s;
+    }
+    .card-note:hover::after { opacity: 1; }
+    .card-note-input {
+      width: 100%;
+      font-size: 12.5px;
+      font-family: inherit;
+      border: 1px solid var(--brand);
+      border-radius: 7px;
+      padding: 8px 11px;
+      resize: vertical;
+      min-height: 60px;
+      outline: none;
+      color: var(--text-1);
+      line-height: 1.55;
+      display: none;
+      margin-bottom: 12px;
+    }
+
+    .last-action {
+      font-size: 12px;
+      color: var(--text-3);
+      padding-top: 10px;
+      border-top: 1px solid var(--border-2);
+    }
+    .last-action strong { color: var(--text-2); }
+
+    /* ── Card actions footer ── */
+    .card-footer {
+      padding: 12px 16px;
+      border-top: 1px solid var(--border-2);
+      background: #fafaf9;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .btn-resume {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: var(--brand);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 7px 14px;
+      border-radius: 7px;
+      text-decoration: none;
+      border: none;
+      cursor: pointer;
+      transition: background .15s;
+      white-space: nowrap;
+    }
+    .btn-resume:hover { background: var(--brand-dark); }
+
+    .btn-ghost {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: transparent;
+      color: var(--text-2);
+      font-size: 13px;
+      font-weight: 500;
+      padding: 6px 11px;
+      border-radius: 7px;
+      text-decoration: none;
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: all .15s;
+      white-space: nowrap;
+    }
+    .btn-ghost:hover { background: var(--bg); color: var(--text-1); border-color: #ccc; }
+
+    .btn-danger {
+      display: inline-flex;
+      align-items: center;
+      background: transparent;
+      color: #dc2626;
+      font-size: 13px;
+      font-weight: 500;
+      padding: 6px 11px;
+      border-radius: 7px;
+      border: 1px solid #fca5a5;
+      cursor: pointer;
+      transition: all .15s;
+      margin-left: auto;
+    }
+    .btn-danger:hover { background: #fef2f2; }
+
+    /* ── Save indicator ── */
+    .save-status {
+      font-size: 11px;
+      color: var(--success-fg);
+      padding: 2px 0;
+      display: none;
+    }
+    .save-status.show { display: inline; }
+  </style>
+</head>
+<body>
+
+<nav class="nav">
+  <a href="/" class="nav-brand">
+    <div class="nav-brand-icon">🧹</div>
+    inDataOut
+  </a>
+  <div class="nav-links">
+    <a href="/" class="nav-link">↑ New Upload</a>
+    <a href="/projects" class="nav-link active">My Projects</a>
+  </div>
+  <a href="/" class="nav-cta">⬆ Upload Dataset</a>
+</nav>
+
+<div class="page">
+
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      {% for msg in messages %}
+        <div class="flash">⚠️ {{ msg }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  <div class="page-header">
+    <div>
+      <div class="page-title">My Projects</div>
+      <div class="page-sub">{{ projects|length }} project{{ 's' if projects|length != 1 else '' }} — click a name or note to edit inline</div>
+    </div>
+    <a href="/" class="btn-new">+ New project</a>
+  </div>
+
+  {% if not projects %}
+    <div class="empty">
+      <div class="empty-icon">📂</div>
+      <h2>No projects yet</h2>
+      <p>Upload a dataset to create your first project and start cleaning.</p>
+      <a href="/" class="btn-new">Upload a file</a>
+    </div>
+  {% else %}
+    <div class="grid">
+      {% for p in projects %}
+        <div class="card" data-project-id="{{ p.id }}">
+
+          <div class="card-top">
+            <!-- Header row: name + status badge -->
+            <div class="card-head">
+              <div class="project-name-wrap">
+                <div class="project-name-display" title="Click to rename">
+                  <span class="name-text">{{ p.name }}</span>
+                  <span class="edit-pencil">✏️</span>
+                </div>
+                <div class="name-input-wrap">
+                  <input type="text" class="name-input" value="{{ p.name }}" maxlength="255"
+                         placeholder="Project name…">
+                  <span class="save-status">✓ Saved</span>
+                </div>
+                <div class="card-file">{{ p.original_file }}</div>
+              </div>
+              <span class="status-badge badge-{{ p.status }}">{{ p.status }}</span>
+            </div>
+
+            <!-- Stats row -->
+            <div class="card-meta">
+              <div class="meta-pill"><strong>{{ p.row_count or '—' }}</strong> rows</div>
+              <div class="meta-pill"><strong>{{ p.col_count or '—' }}</strong> cols</div>
+              <div class="meta-pill"><strong>{{ p.action_count or 0 }}</strong> actions</div>
+              <div class="meta-pill">
+                Created <strong>{{ p.created_at.strftime('%d %b %Y') if p.created_at else '—' }}</strong>
+              </div>
+            </div>
+
+            <!-- Notes section -->
+            <div class="card-note {% if not p.notes %}empty-note{% endif %}"
+                 title="Click to add a note">
+              {{ p.notes if p.notes else 'Add a note about this project…' }}
+            </div>
+            <textarea class="card-note-input"
+                      placeholder="Add a note about this project…"
+                      maxlength="2000">{{ p.notes or '' }}</textarea>
+
+            <!-- Last action -->
+            {% if p.last_action_name %}
+              <div class="last-action">
+                Last: <strong>{{ p.last_action_name.replace('_', ' ') }}</strong>
+                {% if p.last_action_at %}
+                  · {{ p.last_action_at.strftime('%d %b, %H:%M') }}
+                {% endif %}
+              </div>
+            {% endif %}
+          </div>
+
+          <!-- Footer actions -->
+          <div class="card-footer">
+            <a href="/projects/{{ p.id }}/resume" class="btn-resume">▶ Resume</a>
+            <a href="/projects/{{ p.id }}" class="btn-ghost">📋 History</a>
+            {% if p.file_path %}
+              <a href="/projects/{{ p.id }}/download/cleaned" class="btn-ghost">⬇ Download</a>
+            {% endif %}
+            <form method="post" action="/projects/{{ p.id }}/delete"
+                  onsubmit="return confirm('Delete this project and its history? This cannot be undone.')">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="btn-danger">🗑</button>
+            </form>
+          </div>
+
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+</div>
+
+<script>
+const CSRF_TOKEN = document.querySelector('meta[name="csrf-token"]')?.content || '';
+function csrfHeaders(extra) {
+  return Object.assign({ 'X-CSRF-Token': CSRF_TOKEN }, extra || {});
+}
+document.querySelectorAll('.card').forEach(card => {
+  const pid = card.dataset.projectId;
+
+  // ── Inline name edit ──────────────────────────────────────────────────
+  const nameDisplay  = card.querySelector('.project-name-display');
+  const nameInputWrap = card.querySelector('.name-input-wrap');
+  const nameText     = card.querySelector('.name-text');
+  const nameInput    = card.querySelector('.name-input');
+  const saveStatus   = card.querySelector('.save-status');
+
+  function showNameEdit() {
+    nameDisplay.style.display = 'none';
+    nameInputWrap.style.display = 'block';
+    nameInput.focus();
+    nameInput.select();
+  }
+
+  function hideNameEdit(save) {
+    if (save && nameInput.value.trim()) {
+      const newName = nameInput.value.trim();
+      fetch(`/projects/${pid}/update_name`, {
+        method: 'POST',
+        headers: csrfHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ name: newName })
+      }).then(r => r.json()).then(d => {
+        if (d.ok) {
+          nameText.textContent = newName;
+          saveStatus.classList.add('show');
+          setTimeout(() => saveStatus.classList.remove('show'), 2000);
+        }
+      }).catch(() => {});
+    }
+    nameInputWrap.style.display = 'none';
+    nameDisplay.style.display = 'flex';
+  }
+
+  if (nameDisplay && nameInput) {
+    nameDisplay.addEventListener('click', showNameEdit);
+    nameInput.addEventListener('blur', () => hideNameEdit(true));
+    nameInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); nameInput.blur(); }
+      if (e.key === 'Escape') { nameInput.value = nameText.textContent; hideNameEdit(false); }
+    });
+  }
+
+  // ── Inline note edit ──────────────────────────────────────────────────
+  const noteDisplay = card.querySelector('.card-note');
+  const noteInput   = card.querySelector('.card-note-input');
+  let noteTimer = null;
+
+  function showNoteEdit() {
+    noteDisplay.style.display = 'none';
+    noteInput.style.display = 'block';
+    noteInput.focus();
+  }
+
+  function saveNote() {
+    clearTimeout(noteTimer);
+    noteTimer = setTimeout(() => {
+      const text = noteInput.value.trim();
+      fetch(`/projects/${pid}/update_notes`, {
+        method: 'POST',
+        headers: csrfHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ notes: text })
+      }).catch(() => {});
+    }, 600);
+  }
+
+  function hideNoteEdit() {
+    const text = noteInput.value.trim();
+    noteDisplay.textContent = text || 'Add a note about this project…';
+    noteDisplay.classList.toggle('empty-note', !text);
+    noteDisplay.style.display = 'block';
+    noteInput.style.display = 'none';
+  }
+
+  if (noteDisplay && noteInput) {
+    noteDisplay.addEventListener('click', showNoteEdit);
+    noteInput.addEventListener('blur', hideNoteEdit);
+    noteInput.addEventListener('input', saveNote);
+  }
+});
+</script>
+
+</body>
+</html>

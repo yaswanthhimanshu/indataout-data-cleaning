@@ -3,12 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>inDataOut — Data Cleaning</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=static_version('style.css')) }}">
+  <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
 </head>
-<body>
+<body data-dataset-version="{{ session.get('dataset_version', 0) }}" data-project-id="{{ session.get('project_id', '') }}">
 
 <!-- Loading Overlay -->
 <div id="loadingOverlay" class="loading-overlay">
@@ -26,7 +29,10 @@
         <div class="brand-tagline">Advanced Data Cleaning</div>
       </div>
     </div>
-    <a href="{{ url_for('index') }}" class="btn btn-accent btn-sm">⬆ Upload Dataset</a>
+    <div style="display:flex;align-items:center;gap:12px">
+      <a href="{{ url_for('projects') }}" class="btn btn-ghost btn-sm">📂 My Projects</a>
+      <a href="{{ url_for('index') }}" class="btn btn-accent btn-sm">⬆ Upload Dataset</a>
+    </div>
   </div>
 </header>
 
@@ -42,6 +48,17 @@
 {% endwith %}
 
 <main data-scroll-target="{% if cleaned %}results{% elif analysis %}analysis{% endif %}">
+<div id="operationProgress" class="operation-progress" aria-live="polite" role="status" hidden>
+  <div class="operation-progress-head">
+    <strong id="operationProgressName">Working</strong>
+    <span id="operationProgressElapsed">0s</span>
+  </div>
+  <div id="operationProgressStage" class="operation-progress-stage">Starting...</div>
+  <div class="operation-progress-bar" aria-hidden="true">
+    <div id="operationProgressBar" class="operation-progress-bar-fill"></div>
+  </div>
+  <div id="operationProgressResult" class="operation-progress-result"></div>
+</div>
 <div class="container">
 
 <!-- ══════════════════════════════════════════
@@ -58,6 +75,7 @@
 
   <div class="upload-card">
     <form id="uploadForm" action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <input id="fileInput" name="file" type="file"
              accept=".csv,.tsv,.txt,.xlsx,.xls,.json" hidden>
 
@@ -97,7 +115,7 @@
     </form>
 
     <div class="upload-footer">
-      <span>🔒 Files are processed in isolated sessions and auto-deleted after download</span>
+      <span>💾 Files are saved to your project — resume anytime from <a href="{{ url_for('projects') }}" style="color:inherit;text-decoration:underline">My Projects</a></span>
       <span>Max 100 MB</span>
     </div>
   </div>
@@ -177,14 +195,16 @@
     <div class="dataset-slide-tabs" role="tablist" aria-label="Dataset views">
       <button type="button" class="dataset-tab active" data-dataset-slide="originalDatasetSlide">Original Uploaded Dataset</button>
       <button type="button" class="dataset-tab" data-dataset-slide="datasetEditorSlide">Dataset Editor</button>
-      <button type="button" class="dataset-tab" data-dataset-slide="progressDatasetSlide">Cleaning Work Progress</button>
+      <button type="button" class="dataset-tab" data-dataset-slide="progressDatasetSlide">Change Log</button>
     </div>
   </div>
 
   <!-- ── Cleaning Options Form ── -->
   <form id="cleanForm" action="{{ url_for('clean') }}" method="post"
         onsubmit="return onCleanSubmit(event)">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="filename" value="{{ uploaded_filename }}">
+    <input type="hidden" name="dataset_version" value="{{ session.get('dataset_version', 0) }}">
 
     <div class="clean-workspace">
     <aside class="workflow-rail">
@@ -199,7 +219,7 @@
       <div class="rail-section">Dataset Views</div>
       <button type="button" class="rail-link rail-dataset-btn active" data-dataset-slide="originalDatasetSlide">Original Uploaded Dataset</button>
       <button type="button" class="rail-link rail-dataset-btn" data-dataset-slide="datasetEditorSlide">Dataset Editor</button>
-      <button type="button" class="rail-link rail-dataset-btn" data-dataset-slide="progressDatasetSlide">Cleaning Work Progress</button>
+      <button type="button" class="rail-link rail-dataset-btn" data-dataset-slide="progressDatasetSlide">Change Log</button>
 
       <div class="rail-section">Cleaning Actions</div>
       <a class="rail-link rail-panel-link active" href="#dataIntegrityGroup" data-panel-target="dataIntegrityGroup">Data Integrity</a>
@@ -207,6 +227,9 @@
       <a class="rail-link rail-panel-link" href="#dataTypesGroup" data-panel-target="dataTypesGroup">Data Types</a>
       <a class="rail-link rail-panel-link" href="#outlierGroup" data-panel-target="outlierGroup">Outliers</a>
       <a class="rail-link rail-panel-link" href="#advancedGroup" data-panel-target="advancedGroup">Advanced Options</a>
+      {% if custom_code_enabled %}
+      <a class="rail-link rail-panel-link" href="#customCodeGroup" data-panel-target="customCodeGroup">Custom Pandas Code</a>
+      {% endif %}
 
       <div class="rail-section">Final Output</div>
       <button type="submit" class="rail-primary-action">Clean Data</button>
@@ -216,53 +239,26 @@
     <div class="preview-card preview-card-primary dataset-slide active" id="originalDatasetSlide">
       <div class="preview-card-header">
         <h3 class="preview-title">Original Uploaded Dataset</h3>
-        <span class="preview-meta">
-          {% if analysis.preview | length < analysis.shape[0] %}
-            Showing first {{ analysis.preview | length }} of {{ analysis.shape[0] }} rows
-          {% else %}
-            {{ analysis.preview | length }} rows
-          {% endif %}
-        </span>
+        <span class="preview-meta">{{ analysis.shape[0] }} rows</span>
       </div>
-      <div class="preview-card-body">
-        {% if analysis.preview and analysis.preview | length > 0 %}
-        <div class="table-scroll">
-          <table class="data-table">
-            <thead>
-              <tr>
-                {% for col in analysis.preview[0].keys() %}<th>{{ col }}</th>{% endfor %}
-              </tr>
-            </thead>
-            <tbody>
-              {% for row in analysis.preview %}
-              <tr>
-                {% for val in row.values() %}
-                  <td title="{{ val }}">{{ val if val is not none else '' }}</td>
-                {% endfor %}
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+      <div class="preview-card-body" style="padding:0;overflow:hidden;">
+        <div id="originalCanvasWrap" style="width:100%;height:400px;overflow:auto;"></div>
+        <div style="padding:5px 14px;font-size:0.74rem;color:var(--text-muted);background:var(--surface-1);border-top:1px solid var(--border);">
+          Showing first {{ analysis.original_preview_count if analysis.original_preview_count is defined else '500' }} of {{ analysis.original_total_rows if analysis.original_total_rows is defined else analysis.shape[0] }} rows &nbsp;&middot;&nbsp; read-only
         </div>
-        {% else %}
-          <div style="padding:20px;text-align:center;color:var(--text-muted);">No preview data available.</div>
-        {% endif %}
       </div>
     </div>
 
     <section class="preview-card dataset-editor-card dataset-slide" id="datasetEditorSlide">
       <div class="preview-card-header dataset-editor-header">
         <div>
-          <h3 class="preview-title">Dataset Editor</h3>
-          <p class="dataset-editor-subtitle">Edit any visible cell. Changed cells are applied before cleaning; unchanged cells are not submitted.</p>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+            <h3 class="preview-title">Dataset Editor</h3>
+            <button type="button" id="editorEditToggle" class="btn btn-outline btn-sm" style="font-size:13px;padding:4px 12px;">🔒 Enable Editing</button>
+          </div>
+          <p class="dataset-editor-subtitle">Editing is off — toggle on to make changes.</p>
         </div>
-        <span class="preview-meta">
-          {% if analysis.preview | length < analysis.shape[0] %}
-            Editing first {{ analysis.preview | length }} of {{ analysis.shape[0] }} rows
-          {% else %}
-            Editing {{ analysis.preview | length }} rows
-          {% endif %}
-        </span>
+        <span class="preview-meta" id="editorRowMeta">Editing {{ analysis.editor_row_count if analysis.editor_row_count is defined else analysis.shape[0] }} rows</span>
       </div>
 
       <div class="dataset-editor-tools">
@@ -279,47 +275,14 @@
         <span id="cellSearchStatus" class="cell-search-status">No search yet.</span>
       </div>
 
-      <div class="dataset-edit-wrap">
-        {% if analysis.preview and analysis.preview | length > 0 %}
-        <table class="dataset-edit-table">
-          <thead>
-            <tr>
-              <th>Uploaded Row #</th>
-              {% for col in analysis.preview[0].keys() %}
-              <th data-column="{{ col }}">
-                <input type="text"
-                       class="dataset-column-input"
-                       data-name="column_rename[{{ col }}]"
-                       data-original="{{ col }}"
-                       data-column="{{ col }}"
-                       value="{{ col }}">
-              </th>
-              {% endfor %}
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in analysis.preview %}
-            {% set row_pos = loop.index0 %}
-            <tr>
-              <td class="dataset-edit-row-number">Row {{ row_pos + 1 }}</td>
-              {% for col, val in row.items() %}
-              <td data-column="{{ col }}">
-                <input type="text"
-                       class="dataset-edit-input"
-                       data-name="cell_update[{{ row_pos }}][{{ col }}]"
-                       data-original="{{ val if val is not none else '' }}"
-                       data-column="{{ col }}"
-                       data-row-number="{{ row_pos + 1 }}"
-                       value="{{ val if val is not none else '' }}">
-              </td>
-              {% endfor %}
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% else %}
-          <div style="padding:20px;text-align:center;color:var(--text-muted);">No editable data available.</div>
-        {% endif %}
+      <div class="dataset-edit-wrap" style="padding:0;overflow:hidden;">
+        <div id="editorCanvasWrap" style="width:100%;height:480px;background:#0f172a;"></div>
+        <div style="padding:5px 14px;font-size:0.74rem;color:var(--text-muted);background:var(--surface-1);border-top:1px solid var(--border);">
+          <span id="editorRowsLoaded">{{ analysis.editor_row_count if analysis.editor_row_count is defined else analysis.shape[0] }} rows loaded</span>
+          &nbsp;&middot;&nbsp; Click to edit &nbsp;&middot;&nbsp; Tab/Enter to move
+          &nbsp;&middot;&nbsp; <strong id="editorChangeCount">0 changes pending</strong>
+        </div>
+        <div id="editorHiddenInputs"></div>
       </div>
 
       <div class="dataset-editor-actions">
@@ -404,10 +367,7 @@
                 {% if item.safe_to_drop %}
                   <span class="badge badge-green">Safe auto-drop</span>
                 {% else %}
-                  <label class="mini-check">
-                    <input type="checkbox" name="drop_column[{{ item.column }}]" value="1">
-                    Drop
-                  </label>
+                  <span class="badge badge-blue">Available below</span>
                 {% endif %}
               </div>
               {% endfor %}
@@ -452,6 +412,40 @@
               <div class="opt-why">💡 Invisible spaces cause false "mismatches" when filtering, joining datasets, or grouping values.</div>
             </div>
           </div>
+
+          <!-- Drop Selected Columns -->
+          <div class="opt-item opt-item-block">
+            <div class="opt-info">
+              <div class="opt-header">
+                <span class="opt-name">Drop Selected Columns</span>
+                <span class="badge badge-blue">Optional</span>
+              </div>
+              <div class="opt-desc">Permanently remove any column you don't need — separate from the automatic empty/constant-column detection above. Use this for columns that have real data but aren't useful for your analysis.</div>
+              <div class="opt-why">💡 Fewer irrelevant columns means a smaller file, faster processing, and less noise when reviewing results.</div>
+              <div class="dtype-table dtype-table-2col">
+                <div class="dtype-table-header">
+                  <span>Column</span>
+                  <span>Drop?</span>
+                </div>
+                <div class="dtype-table-body drop-selected-columns-body">
+                  {% set fully_empty_unnamed_names = analysis.unnamed_columns | selectattr('safe_to_drop') | map(attribute='column') | list %}
+                  {% for col, dtype in analysis.dtypes.items() %}
+                  {% if col not in fully_empty_unnamed_names %}
+                  <div class="dtype-row">
+                    <span class="dtype-col-name" title="{{ col }}">{{ col }}</span>
+                    <label class="mini-check">
+                      <input type="checkbox" name="drop_column[{{ col }}]" value="1">
+                      Drop
+                    </label>
+                  </div>
+                  {% endif %}
+                  {% endfor %}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <button type="button" class="btn btn-ghost btn-sm section-reset-btn" data-section="dataIntegrityGroup" data-section-label="Data Integrity">↺ Reset section</button>
           <button type="button" class="btn btn-outline btn-sm section-apply-btn" data-section-name="Data Integrity">Apply Data Integrity</button>
         </div><!-- /group 1 -->
 
@@ -464,9 +458,7 @@
             <div class="opt-info">
               <div class="opt-header">
                 <span class="opt-name">Missing Value Strategy</span>
-                {% if analysis.missing_count > 0 %}
-                  <span class="badge badge-orange">{{ analysis.missing_count }} missing cells</span>
-                {% endif %}
+                <span class="badge badge-orange" id="missingStrategyBadge" {% if not (analysis.missing_count > 0) %}style="display:none;"{% endif %}>{{ analysis.missing_count }} missing cells</span>
               </div>
               <div class="opt-desc">How to handle cells that contain no value at all.</div>
               <div class="opt-why">💡 <strong>Fill</strong> keeps your row count intact and is safer. <strong>Drop rows</strong> removes any row that has at least one missing value — only use this if missing data is strictly unacceptable.</div>
@@ -478,32 +470,31 @@
             </div>
           </div>
 
-          {% if analysis.missing_by_column and analysis.missing_by_column | length > 0 %}
-          <div class="missing-review-panel">
+          <div class="missing-review-panel" id="missingReviewPanel" {% if not (analysis.missing_by_column and analysis.missing_by_column | length > 0) %}style="display:none;"{% endif %}>
             <div class="missing-review-header">
               <div>
                 <div class="missing-review-title">Missing Values Found</div>
                 <div class="missing-review-subtitle">Use the spreadsheet editor below to type values directly into blank cells before applying fill or drop rules.</div>
               </div>
-              <span class="badge badge-orange">{{ analysis.missing_count }} missing cells</span>
+              <span class="badge badge-orange" id="missingReviewBadge">{{ analysis.missing_count }} missing cells</span>
             </div>
 
-            <div class="missing-column-summary">
+            <div class="missing-column-summary" id="missingColumnSummary">
               {% for item in analysis.missing_by_column %}
                 <span class="missing-count-pill" data-column="{{ item.column }}">{{ item.column }}: {{ item.missing }} ({{ item.percent }}%)</span>
               {% endfor %}
             </div>
           </div>
-          {% endif %}
 
-          {% if analysis.missing_rows and analysis.missing_rows | length > 0 %}
-          <div class="wide-missing-editor">
+          <div class="wide-missing-editor" {% if not (analysis.missing_rows and analysis.missing_rows | length > 0) %}style="display:none;"{% endif %}>
             <div class="wide-missing-header">
               <div>
                 <h3>Manual Missing Value Editor</h3>
-                <p>Every row below contains at least one missing value. Type into highlighted blank cells, then apply typed values to update the Cleaning Work Progress preview.</p>
+                <p>Every row below contains at least one missing value. Type into highlighted blank cells, then apply typed values to update the Change Log preview.</p>
               </div>
-              <span class="badge badge-orange">{{ analysis.missing_rows | length }} affected rows</span>
+              <span class="badge badge-orange">
+                Showing {{ analysis.missing_rows | length }} of {{ analysis.missing_rows_total or analysis.missing_rows | length }} affected rows
+              </span>
             </div>
             <div class="missing-editor-wrap">
               <table class="missing-editor-table">
@@ -542,39 +533,97 @@
               <button type="button" id="applyTypedPreviewBtn" class="btn btn-accent btn-sm">Apply Typed Values</button>
             </div>
           </div>
-          {% endif %}
-
           <!-- Fill sub-options (hidden when drop is selected) -->
           <div id="fillSubOptions">
-            <div class="opt-item opt-item-select">
-              <div class="opt-info">
-                <div class="opt-header">
-                  <span class="opt-name">Fill Numeric Missing Values With</span>
-                </div>
-                <div class="opt-desc">Strategy for filling empty cells in number columns.</div>
-                <div class="opt-why">💡 <strong>Mean</strong> is good for normally distributed data. <strong>Median</strong> is better when your data has outliers. <strong>Zero</strong> is useful for count or flag columns.</div>
-                <select name="fill_numeric" class="opt-select">
-                  <option value="mean" selected>Mean — column average</option>
-                  <option value="median">Median — middle value of column</option>
-                  <option value="zero">Zero — fill with 0</option>
-                </select>
-              </div>
-            </div>
 
-            <div class="opt-item opt-item-select">
+            {# ── Numeric columns: per-column strategy ── #}
+            {% set numeric_col_set = analysis.numeric_columns if analysis and analysis.numeric_columns else [] %}
+            {% set numeric_missing = [] %}
+            {% if analysis and analysis.missing_by_column %}
+              {% for item in analysis.missing_by_column %}
+                {% if item.column in numeric_col_set %}{% set _ = numeric_missing.append(item) %}{% endif %}
+              {% endfor %}
+            {% endif %}
+
+            {% if true %}
+            <div class="opt-item opt-item-select" id="fillNumericItem">
               <div class="opt-info">
                 <div class="opt-header">
-                  <span class="opt-name">Fill Text / Category Missing Values With</span>
+                  <span class="opt-name">Fill Numeric Missing Values — Choose Per Column</span>
                 </div>
-                <div class="opt-desc">Strategy for filling empty cells in text or categorical columns.</div>
-                <div class="opt-why">💡 <strong>Mode</strong> fills with the most common value, maintaining the column's distribution. <strong>"Unknown"</strong> explicitly marks gaps without guessing.</div>
-                <select name="fill_categorical" class="opt-select">
-                  <option value="mode" selected>Mode — most frequent value in the column</option>
-                  <option value="constant">Fill with "Unknown"</option>
-                </select>
+                <div class="opt-desc">Pick a strategy for each numeric column that has missing values. Columns set to <strong>Skip</strong> are left unchanged.</div>
+                <div class="opt-why">💡 <strong>Mean</strong> for normal data · <strong>Median</strong> when outliers exist · <strong>Zero</strong> for count/flag columns · <strong>Drop rows</strong> removes any row missing that value.</div>
+                <table class="per-col-fill-table">
+                  <thead><tr><th>Column</th><th>Missing</th><th>Strategy</th></tr></thead>
+                  <tbody>
+                  {% for item in numeric_missing %}
+                    <tr>
+                      <td class="per-col-fill-name">{{ item.column }}</td>
+                      <td class="per-col-fill-count">{{ item.missing }} ({{ item.percent }}%)</td>
+                      <td>
+                        <select name="fill_numeric_col[{{ item.column }}]" class="per-col-fill-select">
+                          <option value="skip" selected>— Skip —</option>
+                          <option value="mean">Mean (average)</option>
+                          <option value="median">Median (middle value)</option>
+                          <option value="zero">Zero</option>
+                          <option value="drop">Drop rows with missing</option>
+                        </select>
+                      </td>
+                    </tr>
+                  {% endfor %}
+                  </tbody>
+                </table>
               </div>
             </div>
+            {% endif %}
+
+            {# ── Categorical columns: per-column strategy ── #}
+            {% set cat_missing = [] %}
+            {% if analysis and analysis.missing_by_column %}
+              {% for item in analysis.missing_by_column %}
+                {% if item.column not in numeric_col_set %}{% set _ = cat_missing.append(item) %}{% endif %}
+              {% endfor %}
+            {% endif %}
+
+            {% if true %}
+            <div class="opt-item opt-item-select" id="fillCategoricalItem">
+              <div class="opt-info">
+                <div class="opt-header">
+                  <span class="opt-name">Fill Text / Category Missing Values — Choose Per Column</span>
+                </div>
+                <div class="opt-desc">Pick a strategy for each text or categorical column that has missing values. Columns set to <strong>Skip</strong> are left unchanged.</div>
+                <div class="opt-why">💡 <strong>Mode</strong> fills with the most common value · <strong>Unknown</strong> explicitly marks gaps · <strong>Drop rows</strong> removes rows missing that value.</div>
+                <table class="per-col-fill-table">
+                  <thead><tr><th>Column</th><th>Missing</th><th>Strategy</th></tr></thead>
+                  <tbody>
+                  {% for item in cat_missing %}
+                    <tr>
+                      <td class="per-col-fill-name">{{ item.column }}</td>
+                      <td class="per-col-fill-count">{{ item.missing }} ({{ item.percent }}%)</td>
+                      <td>
+                        <select name="fill_categorical_col[{{ item.column }}]" class="per-col-fill-select">
+                          <option value="skip" selected>— Skip —</option>
+                          <option value="mode">Mode (most common value)</option>
+                          <option value="constant">Mark as "Unknown"</option>
+                          <option value="drop">Drop rows with missing</option>
+                        </select>
+                      </td>
+                    </tr>
+                  {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            {% endif %}
+
+            {% if not numeric_missing and not cat_missing %}
+            <div class="opt-item" id="noMissingValuesItem"><div class="opt-info">
+              <div class="opt-desc" style="color:var(--success);">✓ No missing values found in this dataset.</div>
+            </div></div>
+            {% endif %}
+
           </div><!-- /fillSubOptions -->
+          <button type="button" class="btn btn-ghost btn-sm section-reset-btn" data-section="missingValuesGroup" data-section-label="Missing Values">↺ Reset section</button>
           <button type="button" class="btn btn-outline btn-sm section-apply-btn" data-section-name="Missing Values">Apply Missing Values</button>
 
         </div><!-- /group 2 -->
@@ -624,11 +673,12 @@
                     <span class="dtype-current">{{ dtype }}</span>
                     <select name="dtype_map[{{ col }}]" class="dtype-select">
                       <option value="auto" selected>No manual conversion</option>
-                      <option value="numeric">Numeric</option>
-                      <option value="datetime">Datetime</option>
-                      <option value="string">String / Text</option>
-                      <option value="category">Category</option>
-                      <option value="bool">Boolean (true/false)</option>
+                      <option value="int">Integer (Int64)</option>
+                      <option value="float">Float (float64)</option>
+                      <option value="datetime">Datetime (datetime64[ns])</option>
+                      <option value="string">Text (object)</option>
+                      <option value="category">Category (category)</option>
+                      <option value="bool">Boolean (boolean)</option>
                     </select>
                   </div>
                   {% endfor %}
@@ -636,6 +686,7 @@
               </div>
             </div>
           </div>
+          <button type="button" class="btn btn-ghost btn-sm section-reset-btn" data-section="dataTypesGroup" data-section-label="Data Types">↺ Reset section</button>
           <button type="button" class="btn btn-outline btn-sm section-apply-btn" data-section-name="Data Types">Apply Data Types</button>
 
         </div><!-- /group 3 -->
@@ -654,6 +705,14 @@
               <div class="opt-why">💡 Outliers skew averages and can break ML models. Always <strong>preview first</strong> — some "outliers" may be valid data. IQR multiplier = 1.5 (standard Tukey fence).</div>
 
               <div class="outlier-controls">
+                <!-- Column selector: populated by JS from window.INDATAOUT_NUMERIC_COLUMNS -->
+                <div id="outlierColumnSelector" style="margin-bottom:10px;display:none;">
+                  <div style="font-size:0.82rem;font-weight:600;margin-bottom:6px;color:var(--text-secondary);">Select columns to check for outliers:</div>
+                  <div id="outlierColumnList" style="display:flex;flex-wrap:wrap;gap:6px 14px;margin-bottom:8px;max-height:120px;overflow-y:auto;padding:4px 0;"></div>
+                  <label style="font-size:0.8rem;cursor:pointer;">
+                    <input type="checkbox" id="selectAllOutlierCols" style="margin-right:4px;"> Select / deselect all columns
+                  </label>
+                </div>
                 <button type="button" id="previewOutliersBtn" class="btn btn-outline">
                   🔍 Preview Outliers
                 </button>
@@ -714,9 +773,48 @@
               <div class="opt-why">💡 Required for most ML algorithms that only accept numeric input. <strong>Skip this</strong> if you need human-readable output for analysis or reporting.</div>
             </div>
           </div>
+          <button type="button" class="btn btn-ghost btn-sm section-reset-btn" data-section="advancedGroup" data-section-label="Advanced Options">↺ Reset section</button>
           <button type="button" class="btn btn-outline btn-sm section-apply-btn" data-section-name="Advanced Options">Apply Advanced Options</button>
 
         </div><!-- /group 5 -->
+
+        {% if custom_code_enabled %}
+        <!-- Local-only custom Pandas code -->
+        <div class="opt-group" id="customCodeGroup">
+          <div class="opt-group-label">Custom Pandas Code</div>
+
+          <div class="nb-workspace">
+            <div class="nb-df-banner">
+              <div class="nb-df-label">
+                <span class="nb-df-var">df</span>
+                <span class="nb-df-arrow">&#8594;</span>
+                <span class="nb-df-filename">{{ uploaded_filename }}</span>
+                <span class="nb-df-shape">({{ analysis.shape[0] }} rows &times; {{ analysis.shape[1] }} columns)</span>
+              </div>
+              <div class="nb-df-cols">
+                Columns:
+                {% for col in analysis.preview[0].keys() %}
+                  <code>{{ col }}</code>{% if not loop.last %}, {% endif %}
+                {% endfor %}
+              </div>
+              <div class="nb-df-rule">
+                <span class="nb-run-pill">Run</span> to explore &amp; verify &nbsp;&middot;&nbsp;
+                <span class="nb-apply-pill">Apply</span> to commit changes to df &nbsp;&middot;&nbsp;
+                Always use <code>df</code>
+              </div>
+              <div class="nb-df-warning" role="note">
+                Custom code runs exactly as written. Applying a cell may modify, filter, replace, add to, or remove data from the current dataset. Review the preview carefully before applying. Only run code you trust.
+              </div>
+            </div>
+            <div id="nbCellList" class="nb-cell-list"></div>
+            <div class="nb-bottom-bar">
+              <button type="button" id="nbAddCellBtn" class="nb-add-btn">+ Add Cell</button>
+              <span id="nbWorkspaceStatus" class="nb-workspace-status"></span>
+            </div>
+          </div>
+
+        </div>
+        {% endif %}
 
       </div><!-- /options-body -->
 
@@ -730,56 +828,35 @@
     <section class="live-preview-card dataset-slide" id="progressDatasetSlide">
       <div class="live-preview-header">
         <div>
-          <h2 class="live-preview-title">Cleaning Work Progress</h2>
-          <p class="live-preview-subtitle">Use Apply buttons to update this working dataset step by step. The original uploaded dataset stays unchanged above.</p>
-        </div>
-        <div class="live-preview-actions">
-          <button type="button" id="livePreviewBtn" class="btn btn-outline btn-sm">Preview Current Section</button>
-          <button type="button" id="undoPreviewBtn" class="btn btn-ghost btn-sm" disabled>Undo</button>
+          <h2 class="live-preview-title">Change Log</h2>
+          <p class="live-preview-subtitle">Each feature keeps its own action history. Before and After evidence stays attached to the action that created it.</p>
         </div>
       </div>
 
+      <!-- Live stats bar — JS (renderLiveMetrics) replaces all spans after each Apply -->
       <div class="live-metrics" id="liveMetrics">
-        <span>Rows: {{ analysis.shape[0] }}</span>
+        <span>Rows: {{ analysis.shape[0] }} → {{ analysis.shape[0] }}</span>
         <span>Columns: {{ analysis.shape[1] }}</span>
-        <span>Missing: {{ analysis.missing_count }}</span>
+        <span>Filled: 0</span>
+        <span>Duplicates removed: 0</span>
+        <span>Outliers removed: 0</span>
+        <span>Cleaning completeness: 100</span>
+        <span>Data quality: — → —</span>
       </div>
 
-      <div class="live-preview-body">
-        <div class="table-scroll">
-          <table class="data-table" id="livePreviewTable">
-            <thead>
-              {% if analysis.preview and analysis.preview | length > 0 %}
-              <tr>
-                {% for col in analysis.preview[0].keys() %}<th>{{ col }}</th>{% endfor %}
-              </tr>
-              {% endif %}
-            </thead>
-            <tbody>
-              {% if analysis.preview and analysis.preview | length > 0 %}
-              {% for row in analysis.preview[:25] %}
-              <tr>
-                {% for val in row.values() %}
-                  <td title="{{ val }}">{{ val if val is not none else '' }}</td>
-                {% endfor %}
-              </tr>
-              {% endfor %}
-              {% endif %}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <!-- The permanent hierarchy is created from persisted history. Empty feature and sub-feature blocks remain visible. -->
+      <div id="changeLogBlocks"></div>
 
-      <div class="live-log-panel">
-        <div class="live-log-title">What This Preview Does</div>
-        <div id="liveActionLog" class="live-action-log">
-          <div class="live-log-empty">No preview run yet. Change an option or click Preview Current Section.</div>
-        </div>
+      <!-- Hidden containers — kept for JS internals, never displayed -->
+      <div id="liveActionLog"       style="display:none;"></div>
+      <div id="stepPreviewLog"      style="display:none;" aria-hidden="true"><div id="stepPreviewContent"></div></div>
+      <div id="livePreviewScrollArea" style="display:none;">
+        <table id="livePreviewTable"><thead id="livePreviewThead"></thead><tbody id="livePreviewTbody"></tbody></table>
       </div>
-      <div class="live-code-panel">
-        <div class="live-log-title">Pandas Code Applied</div>
-        <pre id="liveCodeLog" class="live-code-log"># Apply a section to see the pandas-style code used.</pre>
-      </div>
+      <details class="live-code-panel">
+        <summary class="live-log-title">Technical Pandas Code</summary>
+        <pre id="liveCodeLog" class="live-code-log"># Apply a cleaning section to see the equivalent Pandas code here.</pre>
+      </details>
     </section>
     </div>
   </form>
@@ -796,11 +873,24 @@
 
   <div class="results-card">
     <div class="results-header">
-      <span class="results-icon">✅</span>
-      <div>
-        <h2 class="results-title">Cleaning Complete!</h2>
-        <p class="results-sub">Review the step-by-step log below, then download your clean file.</p>
+      <div class="results-header-main">
+        <span class="results-icon">✅</span>
+        <div>
+          <h2 class="results-title">Cleaning Complete!</h2>
+          <p class="results-sub">
+            {{ cleaned.report.rows_processed }} rows processed → <strong>{{ cleaned.report.rows_after }}</strong> final
+            {% if cleaned.report.duplicates_removed %} · {{ cleaned.report.duplicates_removed }} duplicate(s) removed{% endif %}
+            {% if cleaned.report.outliers_removed %} · {{ cleaned.report.outliers_removed }} outlier(s) removed{% endif %}
+            {% if cleaned.report.filled_cells %} · {{ cleaned.report.filled_cells }} cell(s) filled{% endif %}
+          </p>
+        </div>
       </div>
+      {% if cleaned.report.data_quality_after is not none %}
+      <div class="results-quality-badge">
+        <span class="rqb-num">{{ cleaned.report.data_quality_after }}</span>
+        <span class="rqb-lbl">Quality Score</span>
+      </div>
+      {% endif %}
     </div>
 
     <div class="results-body">
@@ -810,7 +900,9 @@
       <div class="preview-card preview-card-primary">
         <div class="preview-card-header">
           <h3 class="preview-title">Cleaned Dataset Preview</h3>
-          <span class="preview-meta">{{ cleaned.report.rows_after }} rows × {{ cleaned.report.cleaned_shape[1] }} columns</span>
+        <span class="preview-meta">
+          Showing first {{ cleaned.report.preview | length }} of {{ cleaned.report.rows_after }} rows × {{ cleaned.report.cleaned_shape[1] }} columns
+        </span>
         </div>
         <div class="preview-card-body">
           <div class="table-scroll">
@@ -835,40 +927,33 @@
       </div>
       {% endif %}
 
-      <!-- Metrics Grid -->
-      <div class="metrics-grid">
-        <div class="metric-card">
-          <div class="metric-val">{{ cleaned.report.rows_processed }}</div>
-          <div class="metric-label">Original Rows</div>
+      <!-- Impact Grid — the outcomes that matter most, at a glance -->
+      <div class="impact-grid">
+        <div class="impact-card impact-green">
+          <div class="impact-val">{{ cleaned.report.rows_after }}</div>
+          <div class="impact-label">Rows After Cleaning</div>
+          <div class="impact-sub">of {{ cleaned.report.rows_processed }} original</div>
         </div>
-        <div class="metric-card metric-green">
-          <div class="metric-val">{{ cleaned.report.rows_after }}</div>
-          <div class="metric-label">Rows After Cleaning</div>
+        <div class="impact-card impact-orange">
+          <div class="impact-val">{{ cleaned.report.duplicates_removed }}</div>
+          <div class="impact-label">Duplicates Removed</div>
         </div>
-        <div class="metric-card metric-orange">
-          <div class="metric-val">{{ cleaned.report.duplicates_removed }}</div>
-          <div class="metric-label">Duplicates Removed</div>
+        <div class="impact-card impact-orange">
+          <div class="impact-val">{{ cleaned.report.outliers_removed }}</div>
+          <div class="impact-label">Outlier Rows Removed</div>
         </div>
-        <div class="metric-card metric-orange">
-          <div class="metric-val">{{ cleaned.report.outliers_removed }}</div>
-          <div class="metric-label">Outlier Rows Removed</div>
+        <div class="impact-card impact-green">
+          <div class="impact-val">{{ cleaned.report.filled_cells }}</div>
+          <div class="impact-label">Missing Cells Filled</div>
         </div>
-        <div class="metric-card metric-green">
-          <div class="metric-val">{{ cleaned.report.filled_cells }}</div>
-          <div class="metric-label">Missing Cells Filled</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-val">{{ cleaned.report.empty_columns_removed }}</div>
-          <div class="metric-label">Empty Cols Removed</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-val">{{ cleaned.report.columns_renamed }}</div>
-          <div class="metric-label">Columns Renamed</div>
-        </div>
-        <div class="metric-card metric-green">
-          <div class="metric-val">{{ cleaned.report.cleaned_shape[1] }}</div>
-          <div class="metric-label">Final Column Count</div>
-        </div>
+      </div>
+
+      <!-- Detail Strip — secondary numbers, still visible, lower visual weight -->
+      <div class="detail-strip">
+        <div class="detail-stat"><span>Original Rows</span><strong>{{ cleaned.report.rows_processed }}</strong></div>
+        <div class="detail-stat"><span>Empty Cols Removed</span><strong>{{ cleaned.report.empty_columns_removed }}</strong></div>
+        <div class="detail-stat"><span>Columns Renamed</span><strong>{{ cleaned.report.columns_renamed }}</strong></div>
+        <div class="detail-stat"><span>Final Column Count</span><strong>{{ cleaned.report.cleaned_shape[1] }}</strong></div>
       </div>
 
       <!-- Cleaning Completeness + Data Quality -->
@@ -876,20 +961,13 @@
       <div class="dq-section">
         <div class="dq-scores">
           <div class="dq-score-item">
-            <div class="dq-num" style="color:var(--success);">
-              {{ cleaned.report.cleaning_completeness_score | default(100) }}
-            </div>
-            <div class="dq-lbl">Cleaning Completeness</div>
-          </div>
-          <div class="dq-arrow">|</div>
-          <div class="dq-score-item">
             <div class="dq-num" style="color:var(--warning);">{{ cleaned.report.data_quality_before }}</div>
-            <div class="dq-lbl">Data Quality Before</div>
+            <div class="dq-lbl">Before</div>
           </div>
           <div class="dq-arrow">→</div>
           <div class="dq-score-item">
             <div class="dq-num" style="color:var(--success);">{{ cleaned.report.data_quality_after }}</div>
-            <div class="dq-lbl">Data Quality After</div>
+            <div class="dq-lbl">After</div>
           </div>
           <div class="dq-score-item">
             <div class="dq-num dq-improvement"
@@ -898,11 +976,14 @@
                 {% if cleaned.report.dq_improvement >= 0 %}+{{ cleaned.report.dq_improvement }}{% else %}{{ cleaned.report.dq_improvement }}{% endif %}
               {% else %}N/A{% endif %}
             </div>
-            <div class="dq-lbl">Quality Change</div>
+            <div class="dq-lbl">Change</div>
           </div>
         </div>
         <div class="dq-bar-section">
-          <div class="dq-bar-label">Practical Data Quality Score</div>
+          <div class="dq-bar-label">
+            Practical Data Quality Score
+            <span class="dq-completeness-chip">Cleaning completeness: {{ cleaned.report.cleaning_completeness_score | default(100) }}</span>
+          </div>
           <div class="dq-bar-outer">
             <div class="dq-bar-inner"
                  data-score="{{ cleaned.report.data_quality_after if cleaned.report.data_quality_after is not none else 0 }}">
@@ -953,13 +1034,15 @@
 
             {# ── trim_whitespace ── #}
             {% elif op.action == 'trim_whitespace' %}
-            <div class="log-item log-success">
-              <span class="log-ico">✂️</span>
-              <div class="log-body">
-                <strong>Trimmed whitespace in {{ op.columns_processed | list | length }} text column(s)</strong>
-                <div class="log-detail">Stripped leading/trailing spaces from: <span class="mono">{{ op.columns_processed | join(', ') }}</span></div>
+              {% if op.columns_processed | default([]) | length > 0 %}
+              <div class="log-item log-success">
+                <span class="log-ico">✂️</span>
+                <div class="log-body">
+                  <strong>Trimmed whitespace in {{ op.columns_processed | list | length }} text column(s)</strong>
+                  <div class="log-detail">Stripped leading/trailing spaces from: <span class="mono">{{ op.columns_processed | join(', ') }}</span></div>
+                </div>
               </div>
-            </div>
+              {% endif %}
 
             {# ── convert_dtypes (auto) ── #}
             {% elif op.action == 'convert_dtypes' %}
@@ -1045,7 +1128,7 @@
             <div class="log-item log-warn">
               <span class="log-ico">🧾</span>
               <div class="log-body">
-                <strong>Dropped {{ op.count }} reviewed column(s)</strong>
+                <strong>Dropped {{ op.count }} selected column(s)</strong>
                 <div class="log-detail">Columns dropped: <span class="mono">{{ op.columns_dropped | join(', ') }}</span></div>
               </div>
             </div>
@@ -1057,7 +1140,7 @@
                 <span class="log-ico">🗑️</span>
                 <div class="log-body">
                   <strong>Removed {{ op.removed_rows }} duplicate row(s)</strong>
-                  <div class="log-detail">Rows that were 100% identical to another row have been eliminated.</div>
+                  <div class="log-detail">Rows that were 100% identical to another row have been eliminated. Row numbers removed: <span class="mono">{{ op.rows_dropped | join(', ') }}</span></div>
                 </div>
               </div>
               {% else %}
@@ -1074,7 +1157,7 @@
               <div class="log-body">
                 <strong>Removed {{ op.rows_removed }} outlier row(s) — based on your selection</strong>
                 <div class="log-detail">
-                  Original row numbers removed: <span class="mono">{{ op.selected_row_numbers | default(op.valid_indices_dropped) | join(', ') }}</span>
+                  Original row numbers removed: <span class="mono">{{ op.row_numbers | join(', ') }}</span>
                 </div>
               </div>
             </div>
@@ -1103,7 +1186,19 @@
             <div class="log-item log-warn">
               <span class="log-ico">🗑️</span>
               <div class="log-body">
-                <strong>Dropped {{ op.rows_dropped }} row(s) that contained missing values</strong>
+                <strong>Dropped {{ op.dropped_row_count }} row(s) that contained missing values</strong>
+                <div class="log-detail">Row numbers dropped: <span class="mono">{{ op.row_numbers | join(', ') }}</span></div>
+                {% if op.missing_columns_by_row %}
+                  <details style="margin-top:4px;">
+                    <summary style="cursor:pointer;font-size:12px;">Show missing columns per row</summary>
+                    <div style="font-size:12px;margin-top:4px;">
+                      {% for item in op.missing_columns_by_row[:12] %}
+                        <div>Row {{ item.row }}: missing <span class="mono">{{ item.columns | join(', ') }}</span></div>
+                      {% endfor %}
+                      {% if op.missing_columns_by_row | length > 12 %}<div>… and {{ op.missing_columns_by_row | length - 12 }} more</div>{% endif %}
+                    </div>
+                  </details>
+                {% endif %}
               </div>
             </div>
 
@@ -1121,29 +1216,87 @@
               </div>
             </div>
 
-            {# ── fill_numeric (new log entry from fixed cleaner.py) ── #}
+            {# ── manual_cell_updates (Dataset Editor cell edits) ── #}
+            {% elif op.action == 'manual_cell_updates' %}
+            <div class="log-item log-info">
+              <span class="log-ico">✏️</span>
+              <div class="log-body">
+                <strong>Updated {{ op.count }} dataset cell(s) manually</strong>
+                <div class="log-detail">
+                  {% for update in op.updates %}
+                    <span class="mono">Row {{ update.row_number }}, {{ update.column }} → "{{ update.value }}"</span>{% if not loop.last %};  {% endif %}
+                  {% endfor %}
+                </div>
+              </div>
+            </div>
+
+            {# ── manual_column_renames (Dataset Editor column renames) ── #}
+            {% elif op.action == 'manual_column_renames' %}
+            <div class="log-item log-info">
+              <span class="log-ico">🏷️</span>
+              <div class="log-body">
+                <strong>Renamed {{ op.count }} column(s) manually</strong>
+                <div class="log-detail">
+                  {% for old, new in op.renamed_map.items() %}
+                    <span class="mono">"{{ old }}" → "{{ new }}"</span>{% if not loop.last %}, {% endif %}
+                  {% endfor %}
+                </div>
+              </div>
+            </div>
+
+            {# ── fill_numeric (per-column strategies fixed) ── #}
             {% elif op.action == 'fill_numeric' %}
               {% if op.filled_cells | default(0) > 0 %}
               <div class="log-item log-success">
                 <span class="log-ico">🔢</span>
                 <div class="log-body">
-                  <strong>Filled {{ op.filled_cells }} missing numeric cell(s) using <em>{{ op.strategy }}</em> strategy</strong>
+                  <strong>
+                    Filled {{ op.filled_cells }} missing numeric cell(s)
+                    {% if op.column_strategies and op.column_strategies|length > 0 %}
+                      using per-column strategies:
+                      {% for col, strat in op.column_strategies.items() %}
+                        <code>{{ col }}</code> → <em>{{ strat }}</em>{% if not loop.last %}, {% endif %}
+                      {% endfor %}
+                    {% else %}
+                      using <em>{{ op.strategy }}</em> strategy
+                    {% endif %}
+                  </strong>
+                  {% if op.details %}
+                  <div class="log-detail">
+                    {% for detail in op.details %}
+                      <span class="mono">{{ detail.column }}: {{ detail.filled }} filled with "{{ detail.value }}" on rows {{ detail.rows | join(', ') }}</span>{% if not loop.last %}; {% endif %}
+                    {% endfor %}
+                    {% if op.skipped and op.skipped|length > 0 %}
+                      <br><span class="mono">Skipped: {% for s in op.skipped %}{{ s.column }} ({{ s.reason }}){% if not loop.last %}, {% endif %}{% endfor %}</span>
+                    {% endif %}
+                  </div>
+                  {% endif %}
                 </div>
               </div>
               {% endif %}
 
-            {# ── fill_categorical ── #}
+            {# ── fill_categorical (per-column strategies fixed) ── #}
             {% elif op.action == 'fill_categorical' %}
               {% if op.filled_cells | default(0) > 0 %}
               <div class="log-item log-success">
                 <span class="log-ico">📝</span>
                 <div class="log-body">
-                  <strong>Filled {{ op.filled_cells }} missing text/category cell(s) using <em>{{ op.strategy }}</em> strategy</strong>
+                  <strong>
+                    Filled {{ op.filled_cells }} missing text/category cell(s)
+                    {% if op.column_strategies and op.column_strategies|length > 0 %}
+                      using per-column strategies:
+                      {% for col, strat in op.column_strategies.items() %}
+                        <code>{{ col }}</code> → <em>{{ strat }}</em>{% if not loop.last %}, {% endif %}
+                      {% endfor %}
+                    {% else %}
+                      using <em>{{ op.strategy }}</em> strategy
+                    {% endif %}
+                  </strong>
                   {% if op.details %}
                   <div class="log-detail">
                     {% for col, info in op.details.items() %}
                       {% if info.filled | default(0) > 0 %}
-                        <span class="mono">{{ col }}: {{ info.filled }} filled{% if info.value is defined %} with "{{ info.value }}"{% endif %}</span>{% if not loop.last %};  {% endif %}
+                        <span class="mono">{{ col }}: {{ info.filled }} filled{% if info.value is defined %} with "{{ info.value }}"{% endif %}{% if info.rows %} on rows {{ info.rows | join(', ') }}{% endif %}</span>{% if not loop.last %}; {% endif %}
                       {% endif %}
                     {% endfor %}
                   </div>
@@ -1152,6 +1305,48 @@
               </div>
               {% endif %}
 
+            {# ── custom_pandas_code ── #}
+            {% elif op.action == 'custom_pandas_code' %}
+            <div class="log-item log-success">
+              <span class="log-ico">🐍</span>
+              <div class="log-body">
+                <strong>Applied custom Pandas code</strong>
+                <div class="log-detail" style="margin-top:4px;">
+                  <details>
+                    <summary style="cursor:pointer;">Show code</summary>
+                    <pre style="background:#0f172a;color:#e2e8f0;padding:10px;border-radius:6px;overflow-x:auto;font-size:12px;white-space:pre-wrap;">{{ op.code }}</pre>
+                  </details>
+                  {% if op.changed_cell_details and op.changed_cell_details|length > 0 %}
+                    <div style="margin-top:6px;">Changed {{ op.changed_cells }} cell(s):</div>
+                    <div style="max-height:150px;overflow-y:auto;font-size:12px;">
+                      <table style="width:100%;border-collapse:collapse;font-family:monospace;font-size:12px;">
+                        <thead><tr style="border-bottom:1px solid #334155;"><th style="text-align:left;padding:4px;">Row</th><th style="text-align:left;padding:4px;">Column</th><th style="text-align:left;padding:4px;">Before</th><th style="text-align:left;padding:4px;">After</th></tr></thead>
+                        <tbody>
+                          {% for change in op.changed_cell_details[:20] %}
+                            <tr><td style="padding:4px;">{{ change.row_number }}</td><td style="padding:4px;">{{ change.column }}</td><td style="padding:4px;">{{ change.before }}</td><td style="padding:4px;">{{ change.after }}</td></tr>
+                          {% endfor %}
+                          {% if op.changed_cell_details|length > 20 %}<tr><td colspan="4" style="padding:4px;">… and {{ op.changed_cell_details|length - 20 }} more</td></tr>{% endif %}
+                        </tbody>
+                      </table>
+                    </div>
+                  {% endif %}
+                  {% if op.rows_removed or op.rows_added %}
+                    <div>Rows: {{ op.rows_before }} → {{ op.rows_after }} (removed {{ op.rows_removed }}, added {{ op.rows_added }})</div>
+                  {% endif %}
+                </div>
+              </div>
+            </div>
+
+            {# ── skip_missing_values ── #}
+            {% elif op.action == 'skip_missing_values' %}
+            <div class="log-item log-muted">
+              <span class="log-ico">⏭️</span>
+              <div class="log-body">
+                <strong>Missing value handling skipped</strong>
+                <div class="log-detail">{{ op.reason | default('Not selected for this run.') }}</div>
+              </div>
+            </div>
+
             {# ── label_encode ── #}
             {% elif op.action == 'label_encode' %}
             <div class="log-item log-info">
@@ -1159,6 +1354,16 @@
               <div class="log-body">
                 <strong>Label-encoded {{ op.columns_encoded | length }} categorical column(s)</strong>
                 <div class="log-detail">Text categories converted to integers in: <span class="mono">{{ op.columns_encoded | join(', ') }}</span></div>
+              </div>
+            </div>
+
+            {# ── fallback: any operation not explicitly handled above still shows something, instead of silently vanishing ── #}
+            {% else %}
+            <div class="log-item log-muted">
+              <span class="log-ico">ℹ️</span>
+              <div class="log-body">
+                <strong>{{ op.action | replace('_', ' ') | title }}</strong>
+                <div class="log-detail">{{ op | tojson }}</div>
               </div>
             </div>
 
@@ -1178,6 +1383,11 @@
            href="{{ url_for('download_report', filename=cleaned.report_filename) }}">
           📄 Download JSON Report
         </a>
+        {% if cleaned.project_id %}
+        <a class="btn btn-ghost" href="{{ url_for('project_detail', project_id=cleaned.project_id) }}">
+          📂 View Project History
+        </a>
+        {% endif %}
         <a class="btn btn-ghost" href="{{ url_for('index') }}">
           🔄 Upload Another File
         </a>
@@ -1223,9 +1433,9 @@
       <div class="feature-desc">Computes a 0–100 quality score before and after cleaning, based on missing values, duplicate rows, outliers, and constant columns.</div>
     </div>
     <div class="feature-card">
-      <div class="feature-ico">🔒</div>
-      <div class="feature-name">Privacy-First Processing</div>
-      <div class="feature-desc">Files live in isolated per-session folders on the server and are auto-deleted after download. Nothing is stored permanently.</div>
+      <div class="feature-ico">💾</div>
+      <div class="feature-name">Project Persistence</div>
+      <div class="feature-desc">Every upload creates a saved project. Resume cleaning, view your full action history, and re-download results anytime from the Projects dashboard.</div>
     </div>
   </div>
 </section>
@@ -1241,7 +1451,18 @@
   </div>
 </footer>
 
-<script src="{{ url_for('static', filename='script.js') }}"></script>
+<div id="indataout-server-data"
+     data-numeric-columns="{{ (analysis.numeric_columns if analysis and analysis.numeric_columns else []) | tojson | forceescape }}"
+     data-initial-dtypes="{{ (analysis.dtypes if analysis and analysis.dtypes else {}) | tojson | forceescape }}"
+     data-missing-by-column="{{ (analysis.missing_by_column if analysis and analysis.missing_by_column else []) | tojson | forceescape }}"
+     data-original-preview="{{ (analysis.original_preview if analysis and analysis.original_preview is defined else []) | tojson | forceescape }}"
+     data-original-total="{{ (analysis.original_total_rows if analysis and analysis.original_total_rows is defined else analysis.shape[0] if analysis and analysis.shape else 0) }}"
+     data-editor-columns="{{ (analysis.editor_columns if analysis and analysis.editor_columns is defined else analysis.dtypes.keys()|list if analysis and analysis.dtypes else []) | tojson | forceescape }}"
+     data-row-index-map="{{ (analysis.row_index_map if analysis and analysis.row_index_map is defined else {}) | tojson | forceescape }}"
+     data-resumed-history="{{ (resumed_history if resumed_history is defined else []) | tojson | forceescape }}"
+     data-resumed-project="{{ (analysis.resumed_project if analysis and analysis.resumed_project is defined else {}) | tojson | forceescape }}"
+     style="display:none;"></div>
+<script src="{{ url_for('static', filename='script.js', v=static_version('script.js')) }}" defer></script>
 <script>
 /* ── Page-level init ── */
 document.addEventListener('DOMContentLoaded', function () {
@@ -1264,12 +1485,13 @@ document.addEventListener('DOMContentLoaded', function () {
     }
   }
 
-  /* Show/hide fill sub-options when strategy changes */
+  /* Per-column fill tables are always visible — each column has its own Skip option.
+     Only hide when "Drop rows" is selected (drop handles everything at once). */
   var stratSel = document.getElementById('missingStrategySelect');
   var fillSub  = document.getElementById('fillSubOptions');
   if (stratSel && fillSub) {
     function syncFillVis() {
-      fillSub.style.display = stratSel.value === 'fill' ? '' : 'none';
+      fillSub.style.display = stratSel.value === 'drop' ? 'none' : '';
     }
     stratSel.addEventListener('change', syncFillVis);
     syncFillVis();
@@ -1286,29 +1508,20 @@ document.addEventListener('DOMContentLoaded', function () {
 
 /* ── Called by clean form onsubmit ── */
 function onCleanSubmit(event) {
+  /* Serializes the applied-history ledger (window._ido.appliedControlEntries)
+     — which already includes any selected_outlier_rows persisted on outlier
+     Apply — into a single applied_entries JSON field. This is the only
+     source of truth for the final clean; we no longer re-read outlier
+     checkboxes from the live DOM here, since they're cleared right after
+     Apply and would otherwise make applied outlier removals vanish. */
   if (window.indataoutPrepareAppliedControls) {
     window.indataoutPrepareAppliedControls();
   }
 
-  /* 1. Capture selected outlier rows (single source of truth) */
-  var existing = document.querySelector('input[name="selected_outlier_rows"]');
-  if (existing) existing.remove();
-
-  var section = document.getElementById('outlierPreviewSection');
-  if (section && section.style.display !== 'none') {
-    var checked = Array.from(document.querySelectorAll('.outlier-checkbox:checked'))
-      .map(function (cb) { return parseInt(cb.dataset.row, 10); })
-      .filter(function (n) { return !isNaN(n); });
-    if (checked.length > 0) {
-      var inp = document.createElement('input');
-      inp.type  = 'hidden';
-      inp.name  = 'selected_outlier_rows';
-      inp.value = JSON.stringify(checked);
-      document.getElementById('cleanForm').appendChild(inp);
-    }
+  if (window._ido && window._ido.operationProgress) {
+    window._ido.operationProgress.start('Final Clean', 'Finalizing current committed dataset');
   }
 
-  /* 2. Show loading overlay */
   var overlay = document.getElementById('loadingOverlay');
   var msg     = document.getElementById('loadingMsg');
   if (overlay) overlay.classList.add('active');

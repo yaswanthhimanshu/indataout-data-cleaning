@@ -1,18 +1,50 @@
-# Ignore uploaded and processed files
-uploads/
-cleaned/
-reports/
+# Environment & Secrets
+.env
+.secret_key
 
-# Python cache & compiled files
+# Python Cache
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 
-# Virtual environment
+# Virtual Environment
+.venv/
 venv/
-.env
+env/
 
-# System files
+# Application Data (User files )
+uploads/
+cleaned/
+reports/
+*.feather
+*.log
+
+# Build Outputs
+dist/
+build/
+*.exe
+*.pkg
+*.toc
+*.manifest
+warn-*.txt
+xref-*.html
+base_library.zip
+
+# System Files
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# IDE Files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary Files
+*.tmp
+*.temp
+*.lock
+*.bak
+*.backup

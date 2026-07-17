@@ -8,3 +8,9 @@ xlrd
 python-dateutil
 gunicorn
 chardet
+waitress
+mysql-connector-python
+python-dotenv
+pywebview
+pyinstaller
+pyarrow
