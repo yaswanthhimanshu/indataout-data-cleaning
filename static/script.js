@@ -3215,17 +3215,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (grid && typeof grid.commitActiveInput === 'function') {
         grid.commitActiveInput();
       }
-      if (window._ido.syncEditorGridChanges) {
-        window._ido.syncEditorGridChanges();
-      }
-      // grid.getChanges() is the CanvasGrid's own tracking of what's changed
-      // since its last setData() call (i.e. since the last successful apply/
-      // undo/reapply/resume) — the correct signal for "is there anything NEW
-      // to apply", now that appliedControlEntries persists cumulative cell
-      // edits across applies (see syncChanges/refreshEditorCanvas) and can
-      // no longer be used for that check on its own.
       const dirtyChanges = grid ? grid.getChanges() : [];
-      // Legacy HTML input edits (column renames etc)
       const editedCells = datasetEditInputs.filter(input => input.value !== input.dataset.original);
       const renamedColumns = datasetColumnInputs.filter(input => input.value !== input.dataset.original);
 
@@ -3237,11 +3227,6 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
 
-      // Build formData manually from appliedControlEntries so canvas edits are included.
-      // This now includes every cell_update[...] ever committed in this session,
-      // not just the ones just edited — necessary because clean_dataframe()
-      // always recomputes from the raw uploaded file, so anything left out
-      // here would silently revert.
       const filename = cleanForm ? cleanForm.querySelector('[name="filename"]')?.value : null;
       const fd = new FormData();
       if (filename) fd.append('filename', filename);
@@ -3251,33 +3236,27 @@ document.addEventListener('DOMContentLoaded', () => {
       fd.append('operation_token', 'op_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10));
       fd.append('action_name', 'Dataset edits');
       fd.append('action_scope', 'datasetEditorSlide');
-      // Submit only edits made since the last authoritative refresh. Earlier
-      // actions already exist in the server snapshot and must not replay.
-      _diffLedger(
-        window._ido._datasetEditorLedgerBaseline || [],
-        window._ido.appliedControlEntries || []
-      ).forEach(({ key, after }) => {
-        if (after !== null && after !== undefined) fd.append(key, after);
+      // Read directly from the grid's own dirty-cell tracking at click time —
+      // the simplest, self-contained source of truth for "what's pending
+      // right now", instead of diffing a separately-tracked cross-closure
+      // ledger baseline (a repeated source of bugs in this feature).
+      dirtyChanges.forEach(({ rowIdx, colKey, value }) => {
+        const rowIndexMapRef = window._ido.rowIndexMap || {};
+        const dfIdx = rowIndexMapRef[String(rowIdx)];
+        fd.append(`cell_update[${dfIdx !== undefined ? dfIdx : rowIdx}][${colKey}]`, value);
       });
-      // Include any legacy HTML column renames
       renamedColumns.forEach(input => { if (input.name) fd.append(input.name, input.value); });
-
-      // Exactly what THIS apply added/changed in the ledger, computed against
-      // the baseline captured the last time refreshEditorCanvas() ran (i.e.
-      // right after the previous apply/undo/reapply/resume) — NOT against
-      // canvasChanges re-derived from the current ledger, which by click time
-      // already contains this apply's new values and would produce an empty
-      // diff (the bug this replaces). Same _diffLedger every other panel uses.
-      const ownEntriesForEdit = _diffLedger(window._ido._datasetEditorLedgerBaseline || [], window._ido.appliedControlEntries || []);
 
       const previousPreviewState = capturePreviewState();
       if (liveActionLog) {
         liveActionLog.innerHTML = '<div class="live-log-empty">Applying dataset edits...</div>';
       }
+      applyDatasetEditsBtn.disabled = true;
 
       fetch('/preview_clean', { method: 'POST', body: fd })
         .then(r => r.json())
         .then(data => {
+          applyDatasetEditsBtn.disabled = false;
           if (!data.success) { showPreviewError(data.error || 'Apply failed', data.session_expired); return; }
           if (window._ido.refreshAuthoritativeProjectState &&
               !window._ido.refreshAuthoritativeProjectState(data)) return;
@@ -3289,11 +3268,8 @@ document.addEventListener('DOMContentLoaded', () => {
           }
           applyWorkingColumns(data.report && data.report.cleaned_columns);
           // Resets the canvas grid's own dirty-tracking baseline to this
-          // apply's result, AND captures the new ledger baseline for the
-          // *next* Dataset Editor apply's own_entries diff. Without this
-          // call, grid.getChanges() would keep reporting these same edits
-          // as "still pending" forever, and the next apply's before/after
-          // diff would be computed against a stale baseline.
+          // apply's result. Without this call, grid.getChanges() would keep
+          // reporting these same edits as "still pending" forever.
           if (window._ido && window._ido.refreshEditorCanvas) {
             window._ido.refreshEditorCanvas(
               data.editor_columns || (data.report && data.report.cleaned_columns),
@@ -3312,40 +3288,34 @@ document.addEventListener('DOMContentLoaded', () => {
           showDatasetSlide('progressDatasetSlide');
           const progressSlide = document.getElementById('progressDatasetSlide');
           if (progressSlide) progressSlide.scrollIntoView({ behavior: 'smooth', block: 'start' });
-          // This apply's formData carries forward every previously-applied
-          // control (appliedControlEntries), so the backend can end up
-          // re-running things like fill_numeric alongside the actual cell
-          // edit. Restrict what gets logged here to what Dataset Editor
-          // actually owns — same SCOPE_OP_MAP used everywhere else — so a
-          // recompute of another panel's operation can never bleed into this
-          // action's label or before/after preview.
+          // Restrict what gets logged here to what Dataset Editor actually
+          // owns — same SCOPE_OP_MAP used everywhere else — so this action's
+          // label or before/after preview can never pick up another panel's
+          // operation.
           const datasetEditorOps = window._ido.SCOPE_OP_MAP && window._ido.SCOPE_OP_MAP.datasetEditorSlide;
-          let editOps = _newOrChangedOperations(visibleOperations(data.report && data.report.operations));
+          let editOps = visibleOperations(data.report && data.report.operations);
           if (datasetEditorOps) editOps = editOps.filter(op => datasetEditorOps.has(op.action));
-          if (editOps.length) {
-            _markOperationsLogged(editOps);
+          const serverHistory = data.history_entry || null;
+          const serverConfig = serverHistory && serverHistory.action_config ? serverHistory.action_config : null;
+          if (serverConfig && Array.isArray(serverConfig.operations)) {
+            editOps = serverConfig.operations.filter(op => datasetEditorOps ? datasetEditorOps.has(op.action) : true);
+          }
+          if (editOps.length && serverHistory && serverHistory.id) {
             let createdActions = [];
-            const serverHistory = data.history_entry || null;
-            const serverConfig = serverHistory && serverHistory.action_config ? serverHistory.action_config : null;
-            if (serverConfig && Array.isArray(serverConfig.operations)) {
-              editOps = serverConfig.operations.filter(op => datasetEditorOps ? datasetEditorOps.has(op.action) : true);
-            }
             if (window._ido && window._ido.pushAppliedHistory) {
               createdActions = window._ido.pushAppliedHistory('Dataset edits', previousPreviewState, capturePreviewState(), editOps, 'datasetEditorSlide', {
-                ownEntries: ownEntriesForEdit,
                 preview: serverConfig && serverConfig.preview,
-                dbHistoryId: serverHistory && serverHistory.id,
+                dbHistoryId: serverHistory.id,
                 hasManifest: !!(serverHistory && serverHistory.has_manifest),
               }) || [];
             }
-            if (!serverHistory || !serverHistory.id) throw new Error('Dataset edit was not persisted to authoritative history.');
             createdActions.forEach(a => {
               a.dbHistoryId = serverHistory.id;
               a.hasManifest = !!serverHistory.has_manifest;
             });
           }
         })
-        .catch(err => showPreviewError(err.message || 'Apply failed', false));
+        .catch(err => { applyDatasetEditsBtn.disabled = false; showPreviewError(err.message || 'Apply failed', false); });
     });
   }
 
@@ -4728,6 +4698,10 @@ document.addEventListener('DOMContentLoaded', () => {
       pageHost.innerHTML = `<button type="button" data-page="prev" ${pageNumber <= 1 ? 'disabled' : ''}>Previous</button>
         <span>Page ${pageNumber} of ${pages}</span>
         <button type="button" data-page="next" ${pageNumber >= pages ? 'disabled' : ''}>Next</button>`;
+      const headerSpan = modal.querySelector('.cl-full-header span');
+      if (headerSpan) headerSpan.textContent = `Action #${displayNum} - Full Changes`;
+      const note = modal.querySelector('.cl-full-note');
+      if (note) note.remove();
       return true;
     }
     function renderPage() {
