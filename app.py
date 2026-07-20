@@ -431,6 +431,21 @@ def _df_fingerprint(df: pd.DataFrame):
         return None  # unhashable dtype edge case — treat as "always changed"
 
 
+def _dataframes_match_for_history(left: pd.DataFrame, right: pd.DataFrame) -> bool:
+    """Return True only when values, row/column labels, and dtypes match."""
+    if left.shape != right.shape:
+        return False
+    if list(left.index) != list(right.index) or list(left.columns) != list(right.columns):
+        return False
+    if {c: str(left[c].dtype) for c in left.columns} != {c: str(right[c].dtype) for c in right.columns}:
+        return False
+    try:
+        pd.testing.assert_frame_equal(left, right, check_dtype=True, check_like=False)
+        return True
+    except AssertionError:
+        return False
+
+
 def get_cached_dq_after(sid: str, df, fp=None) -> float:
     if fp is None:
         fp = _df_fingerprint(df)
@@ -518,7 +533,8 @@ FEATURE_HISTORY_META = {
     "missingValuesGroup": {"label": "Missing Values", "order": 20},
     "dataTypesGroup": {"label": "Data Types", "order": 30},
     "outlierGroup": {"label": "Outliers", "order": 40},
-    "advancedGroup": {"label": "Advanced Options", "order": 50},
+    "datasetEditorSlide": {"label": "Dataset Cell Edits", "order": 50},
+    "dropSelectedColumnsGroup": {"label": "Drop Selected Columns", "order": 55},
     "customCodeGroup": {"label": "Custom Pandas Code", "order": 60},
 }
 
@@ -528,12 +544,6 @@ FEATURE_HISTORY_SUBFEATURES = {
         {"key": "dropEmptyColumns", "label": "Drop Fully Empty Columns", "operations": {"drop_empty_columns"}},
         {"key": "dropConstantColumns", "label": "Drop Constant Columns", "operations": {"drop_constant_columns"}},
         {"key": "trimWhitespace", "label": "Trim Whitespace", "operations": {"trim_whitespace"}},
-    ],
-    "advancedGroup": [
-        {"key": "labelEncoding", "label": "Label Encoding", "operations": {"label_encode"}},
-        {"key": "datasetCellEdits", "label": "Dataset Cell Edits", "operations": {"manual_cell_updates"}},
-        {"key": "columnRenames", "label": "Column Renames", "operations": {"manual_column_renames"}},
-        {"key": "dropSelectedColumns", "label": "Drop Selected Columns", "operations": {"drop_selected_columns"}},
     ],
 }
 
@@ -550,12 +560,11 @@ OPERATION_FEATURE_SCOPE = {
     "drop_empty_columns": "dataIntegrityGroup",
     "drop_constant_columns": "dataIntegrityGroup",
     "trim_whitespace": "dataIntegrityGroup",
-    "drop_selected_columns": "advancedGroup",
-    "manual_column_renames": "advancedGroup",
-    "manual_cell_updates": "advancedGroup",
+    "drop_selected_columns": "dropSelectedColumnsGroup",
+    "manual_column_renames": "datasetEditorSlide",
+    "manual_cell_updates": "datasetEditorSlide",
     "convert_dtypes": "dataTypesGroup",
     "manual_convert_dtypes": "dataTypesGroup",
-    "label_encode": "advancedGroup",
     "custom_pandas_code": "customCodeGroup",
 }
 
@@ -568,7 +577,7 @@ def _history_scope_for(action_name: str, config: dict, operations: list | None =
                 return scope
     active_panel = (config or {}).get("activePanelId")
     if active_panel == "datasetEditorSlide":
-        return "advancedGroup"
+        return "datasetEditorSlide"
     if active_panel in FEATURE_HISTORY_META:
         return active_panel
     name = str(action_name or (config or {}).get("label", "")).lower()
@@ -578,8 +587,10 @@ def _history_scope_for(action_name: str, config: dict, operations: list | None =
         return "missingValuesGroup"
     if "type" in name or "dtype" in name:
         return "dataTypesGroup"
+    if "drop selected" in name or "drop column" in name:
+        return "dropSelectedColumnsGroup"
     if "rename" in name or "edit" in name:
-        return "advancedGroup"
+        return "datasetEditorSlide"
     if "custom" in name or "pandas" in name:
         return "customCodeGroup"
     return "dataIntegrityGroup"
@@ -741,6 +752,7 @@ def _manifest_for_operation(manifest: dict, op: dict, operation_count: int) -> d
     local = {
         "changed_cells": [], "dropped_rows": [], "added_rows": [],
         "dropped_columns": [], "added_columns": [], "truncated": False,
+        "dtype_changes": [],
     }
     action = str(op.get("action") or "")
     row_actions = {"drop_duplicates", "drop_missing_rows", "manual_outlier_removal", "outlier_removal"}
@@ -777,6 +789,10 @@ def _manifest_for_operation(manifest: dict, op: dict, operation_count: int) -> d
             item for item in manifest.get("changed_cells", []) or []
             if str(item.get("col")) in columns
         ]
+        local["dtype_changes"] = [
+            item for item in manifest.get("dtype_changes", []) or []
+            if str(item.get("col")) in columns
+        ]
         if action in ("fill_numeric", "fill_categorical"):
             details = op.get("details") or {}
             detail_items = details.values() if isinstance(details, dict) else details
@@ -795,7 +811,8 @@ def _manifest_for_operation(manifest: dict, op: dict, operation_count: int) -> d
 def _sequential_history_actions(before_df: pd.DataFrame, final_df: pd.DataFrame,
                                 operations: list[dict], manifest: dict,
                                 action_name: str, action_scope: str,
-                                dq_after: float | None) -> list[dict]:
+                                dq_after: float | None,
+                                applied_at_ms: int | None = None) -> list[dict]:
     """Split a combined Apply into independently replayable operation actions."""
     cursor = before_df.copy(deep=True)
     actions = []
@@ -817,6 +834,8 @@ def _sequential_history_actions(before_df: pd.DataFrame, final_df: pd.DataFrame,
             "server_authoritative": True,
             "preview": local_preview,
         }
+        if applied_at_ms:
+            config["applied_at_ms"] = applied_at_ms
         actions.append({
             "action_name": str(op.get("action"))[:128],
             "action_config": config,
@@ -827,7 +846,7 @@ def _sequential_history_actions(before_df: pd.DataFrame, final_df: pd.DataFrame,
             "manifest": local_manifest,
         })
         cursor = next_df
-    if not actions or _df_fingerprint(cursor) != _df_fingerprint(final_df):
+    if not actions or not _dataframes_match_for_history(cursor, final_df):
         raise ValueError("Combined operations could not be separated into exact reversible actions.")
     return actions
 
@@ -844,6 +863,7 @@ def _preview_for_history_operation(preview: dict | None, op: dict) -> dict:
     result.update({
         "changed_cells": [], "removed_rows": [], "added_rows": [],
         "removed_columns": [], "added_columns": [],
+        "dtype_changes": [],
     })
 
     row_removals = {"drop_duplicates", "drop_missing_rows", "manual_outlier_removal", "outlier_removal"}
@@ -870,6 +890,10 @@ def _preview_for_history_operation(preview: dict | None, op: dict) -> dict:
             item for item in (source.get("changed_cells") or [])
             if not columns or str(item.get("column")) in columns
         ]
+        result["dtype_changes"] = [
+            item for item in (source.get("dtype_changes") or [])
+            if not columns or str(item.get("column")) in columns
+        ]
         if action == "manual_column_renames":
             result["removed_columns"] = list(source.get("removed_columns") or [])
             result["added_columns"] = list(source.get("added_columns") or [])
@@ -880,6 +904,7 @@ def _preview_for_history_operation(preview: dict | None, op: dict) -> dict:
         "total_added_rows": len(result["added_rows"]),
         "total_removed_columns": len(result["removed_columns"]),
         "total_added_columns": len(result["added_columns"]),
+        "total_dtype_changes": len(result["dtype_changes"]),
     }
     if action == "drop_duplicates":
         counts["total_removed_rows"] = int(op.get("removed_rows") or len(result["removed_rows"]))
@@ -895,7 +920,7 @@ def _preview_for_history_operation(preview: dict | None, op: dict) -> dict:
         counts["total_removed_columns"] = int(op.get("count") or len(result["removed_columns"]))
     result.update(counts)
     result["displayed_change_count"] = sum(len(result[key]) for key in (
-        "changed_cells", "removed_rows", "added_rows", "removed_columns", "added_columns"
+        "changed_cells", "removed_rows", "added_rows", "removed_columns", "added_columns", "dtype_changes"
     ))
     result["total_change_count"] = sum(counts.values())
     result["is_sample"] = result["displayed_change_count"] < result["total_change_count"]
@@ -928,6 +953,12 @@ def _history_pairs_from_preview(preview: dict | None) -> list[dict]:
         pairs.append({"before": "Column existed", "after": "Dropped", "context": item.get("column")})
     for item in (preview.get("added_columns") or [])[:6 - len(pairs)]:
         pairs.append({"before": "Not present", "after": item.get("column"), "context": "Column"})
+    for item in (preview.get("dtype_changes") or [])[:6 - len(pairs)]:
+        pairs.append({
+            "before": item.get("before"),
+            "after": item.get("after"),
+            "context": f"{item.get('column')} data type",
+        })
     return make_json_safe(pairs)
 
 
@@ -944,6 +975,7 @@ def _history_subfeature(scope: str, operations: list[dict]) -> str | None:
 
 def build_grouped_cleaning_history(history: list[dict]) -> list[dict]:
     """Build feature-local visual cards from persisted server history."""
+    hidden_actions = {"label_encode", "manual_column_renames", "rename_columns"}
     groups = []
     grouped = {}
     for scope, meta in sorted(FEATURE_HISTORY_META.items(), key=lambda item: item[1]["order"]):
@@ -968,6 +1000,8 @@ def build_grouped_cleaning_history(history: list[dict]) -> list[dict]:
         source_preview = config.get("preview") if isinstance(config.get("preview"), dict) else {}
         card_operations = operations or [{}]
         for operation_index, op in enumerate(card_operations):
+            if op and str(op.get("action", "")) in hidden_actions:
+                continue
             scope = _history_scope_for(entry.get("action_name"), config, [op] if op else None)
             if scope not in grouped:
                 scope = "dataIntegrityGroup"
@@ -1504,6 +1538,73 @@ def _source_path_for_project(project: dict) -> str:
     return os.path.join(UPLOAD_FOLDER, project["upload_sid"], project["original_file"])
 
 
+def _find_repairable_source_path(project: dict, expected_path: str) -> str | None:
+    """Find the exact original upload when a packaged app moved upload roots."""
+    original_name = secure_filename(os.path.basename(project.get("original_file") or ""))
+    if not original_name:
+        return None
+
+    candidates = []
+    project_file = project.get("file_path")
+    if project_file:
+        candidates.append(project_file)
+        project_file_dir = os.path.dirname(project_file)
+        candidates.append(os.path.join(project_file_dir, original_name))
+        candidates.append(os.path.join(os.path.dirname(project_file_dir), original_name))
+
+    for base in (os.getcwd(), _persistent_dir(), os.path.dirname(os.path.abspath(__file__))):
+        candidates.append(os.path.join(base, "uploads", project.get("upload_sid") or "", original_name))
+
+    seen = {os.path.abspath(expected_path)}
+    for candidate in candidates:
+        if not candidate:
+            continue
+        candidate = os.path.abspath(candidate)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if os.path.basename(candidate) != original_name or not os.path.exists(candidate):
+            continue
+        try:
+            probe = load_dataset(candidate)
+        except Exception:
+            logging.warning("resume_source_repair unreadable candidate=%s", candidate)
+            continue
+        expected_rows = int(project.get("row_count") or 0)
+        expected_cols = int(project.get("col_count") or 0)
+        if expected_rows and len(probe) != expected_rows:
+            logging.warning("resume_source_repair row mismatch candidate=%s", candidate)
+            continue
+        if expected_cols and len(probe.columns) != expected_cols:
+            logging.warning("resume_source_repair column mismatch candidate=%s", candidate)
+            continue
+        return candidate
+    return None
+
+
+def _ensure_project_source_available(project: dict) -> tuple[str | None, str | None]:
+    """Return the canonical immutable source path, repairing moved exe uploads."""
+    expected_path = _source_path_for_project(project)
+    if os.path.exists(expected_path):
+        return expected_path, None
+
+    candidate = _find_repairable_source_path(project, expected_path)
+    if not candidate:
+        return None, None
+
+    os.makedirs(os.path.dirname(expected_path), exist_ok=True)
+    try:
+        shutil.copy2(candidate, expected_path)
+        logging.info(
+            "resume_source_repaired project_id=%s from=%s to=%s",
+            project.get("id"), candidate, expected_path,
+        )
+        return expected_path, candidate
+    except Exception:
+        logging.exception("resume_source_repair failed project_id=%s", project.get("id"))
+        return None, candidate
+
+
 def replay_project_actions(project_id: int, target_status: dict | None = None) -> tuple[pd.DataFrame, list[dict]]:
     """Rebuild project state by replaying active actions in original order.
 
@@ -1519,8 +1620,8 @@ def replay_project_actions(project_id: int, target_status: dict | None = None) -
     project = db.get_project(project_id)
     if not project:
         raise FileNotFoundError("Project not found.")
-    source_path = _source_path_for_project(project)
-    if not os.path.exists(source_path):
+    source_path, _repaired_from = _ensure_project_source_available(project)
+    if not source_path or not os.path.exists(source_path):
         raise FileNotFoundError("Immutable source file is missing.")
 
     df = load_dataset(source_path)
@@ -2237,6 +2338,7 @@ def _operation_cells_changed(operations: list[dict] | None, manifest: dict | Non
             + len(manifest.get("added_rows", []) or [])
             + len(manifest.get("dropped_columns", []) or [])
             + len(manifest.get("added_columns", []) or [])
+            + len(manifest.get("dtype_changes", []) or [])
         )
     total = 0
     for op in operations or []:
@@ -2320,6 +2422,7 @@ def _manifest_action_preview(before_df: pd.DataFrame, after_df: pd.DataFrame,
     added_all = manifest.get("added_rows") or []
     removed_cols_all = manifest.get("dropped_columns") or []
     added_cols_all = manifest.get("added_columns") or []
+    dtype_all = manifest.get("dtype_changes") or []
 
     changed_cells = [{
         "row_id": item.get("row"),
@@ -2349,13 +2452,20 @@ def _manifest_action_preview(before_df: pd.DataFrame, after_df: pd.DataFrame,
             })
         return columns
 
-    total = sum(map(len, (changed_all, removed_all, added_all, removed_cols_all, added_cols_all)))
+    dtype_changes = [{
+        "column": item.get("col"),
+        "before": item.get("before"),
+        "after": item.get("after"),
+    } for item in dtype_all[:limit]]
+
+    total = sum(map(len, (changed_all, removed_all, added_all, removed_cols_all, added_cols_all, dtype_all)))
     displayed = sum(map(len, (
         changed_cells,
         removed_all[:limit],
         added_all[:limit],
         removed_cols_all[:limit],
         added_cols_all[:limit],
+        dtype_changes,
     )))
     return make_json_safe({
         "before_shape": [int(before_df.shape[0]), int(before_df.shape[1])],
@@ -2367,11 +2477,13 @@ def _manifest_action_preview(before_df: pd.DataFrame, after_df: pd.DataFrame,
         "added_rows": preview_rows(added_all),
         "removed_columns": preview_columns(removed_cols_all),
         "added_columns": preview_columns(added_cols_all),
+        "dtype_changes": dtype_changes,
         "total_changed_cells": len(changed_all),
         "total_removed_rows": len(removed_all),
         "total_added_rows": len(added_all),
         "total_removed_columns": len(removed_cols_all),
         "total_added_columns": len(added_cols_all),
+        "total_dtype_changes": len(dtype_all),
         "displayed_change_count": displayed,
         "total_change_count": total,
         "is_sample": displayed < total,
@@ -2498,6 +2610,10 @@ def preview_clean():
             if persist_apply else _submitted_dataset_version(form_snapshot)
         )
         operation_token = form_snapshot.get("operation_token")
+        try:
+            client_applied_at_ms = int(form_snapshot.get("client_applied_at_ms") or 0) or None
+        except (TypeError, ValueError):
+            client_applied_at_ms = None
         if persist_apply and operation_token:
             cache_key = (sid, operation_token)
             with _operation_cache_lock:
@@ -2646,6 +2762,8 @@ def preview_clean():
                 "server_authoritative": True,
                 "preview": _manifest_action_preview(action_base_df, cleaned_df, manifest_for_history),
             }
+            if client_applied_at_ms:
+                action_config["applied_at_ms"] = client_applied_at_ms
             rows_before = int(action_base_df.shape[0])
             rows_after = int(cleaned_df.shape[0])
             cells_changed = _operation_cells_changed(operations, manifest_for_history)
@@ -2665,6 +2783,7 @@ def preview_clean():
                 history_actions = _sequential_history_actions(
                     action_base_df, cleaned_df, operations, manifest_for_history,
                     action_name, action_scope, payload.get("summary", {}).get("quality_after"),
+                    client_applied_at_ms,
                 )
                 for history_action in history_actions:
                     history_action["action_config"]["operation_token"] = operation_token
@@ -3131,8 +3250,8 @@ def project_detail(project_id: int):
 
     # Restore ALL session keys so every route (preview, download, upload) works after resume
     # Verify the original file still exists on disk — warn if missing
-    original_path = os.path.join(UPLOAD_FOLDER, sid, project["original_file"])
-    file_missing  = not os.path.exists(original_path)
+    original_path, _repaired_from = _ensure_project_source_available(project)
+    file_missing = not (original_path and os.path.exists(original_path))
 
     return render_template("project_detail.html", project=project,
                            history=history, versions=versions,
@@ -3697,10 +3816,12 @@ def resume_project(project_id: int):
     # saved actions exist. Loading the latest cleaned file and replaying actions
     # double-applies cleaning and makes the UI feel like a fresh upload.
     original_path = os.path.join(UPLOAD_FOLDER, project["upload_sid"], project["original_file"])
-    resume_path = original_path if os.path.exists(original_path) else None
+    resume_path, repaired_from = _ensure_project_source_available(project)
     if not resume_path:
         flash("The immutable source file is missing. Restore the original upload before resuming this project.")
         return redirect(url_for("project_detail", project_id=project_id))
+    if repaired_from:
+        flash("The original upload was restored into this app install, so the project can resume normally.")
 
     if not resume_path or not os.path.exists(resume_path):
         flash("Source file not found on disk — the dataset may have been removed. Please upload again.")

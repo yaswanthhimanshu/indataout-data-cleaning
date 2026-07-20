@@ -725,15 +725,31 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let missingCellInputs = Array.from(document.querySelectorAll('.missing-cell-edit input'));
   const missingEditorStatus = document.getElementById('missingEditorStatus');
+  function markMissingInputFromUser(event) {
+    const input = event && event.currentTarget;
+    if (!input) return;
+    if (event.isTrusted) input.dataset.userTyped = '1';
+    if (!input.value.trim()) delete input.dataset.userTyped;
+  }
+  function isUserTypedMissingInput(input) {
+    return !!(input && input.dataset.userTyped === '1' && input.value.trim() !== '' && !input.disabled && input.name);
+  }
+  function syncMissingEditorStatus() {
+    if (!missingEditorStatus) return;
+    const typedCount = missingCellInputs.filter(isUserTypedMissingInput).length;
+    missingEditorStatus.textContent = typedCount > 0
+      ? `${typedCount} typed value${typedCount === 1 ? '' : 's'} ready. These update the dataset first, then cleaning continues.`
+      : 'No typed values yet.';
+    missingEditorStatus.classList.toggle('has-edits', typedCount > 0);
+  }
+  function bindMissingInput(input) {
+    if (!input || input.dataset.missingInputBound === '1') return;
+    input.dataset.missingInputBound = '1';
+    input.addEventListener('input', markMissingInputFromUser);
+    input.addEventListener('input', syncMissingEditorStatus);
+  }
   if (missingCellInputs.length && missingEditorStatus) {
-    function syncMissingEditorStatus() {
-      const typedCount = missingCellInputs.filter(input => input.value.trim() !== '').length;
-      missingEditorStatus.textContent = typedCount > 0
-        ? `${typedCount} typed value${typedCount === 1 ? '' : 's'} ready. These update the dataset first, then cleaning continues.`
-        : 'No typed values yet.';
-      missingEditorStatus.classList.toggle('has-edits', typedCount > 0);
-    }
-    missingCellInputs.forEach(input => input.addEventListener('input', syncMissingEditorStatus));
+    missingCellInputs.forEach(bindMissingInput);
     syncMissingEditorStatus();
   }
 
@@ -1030,10 +1046,25 @@ document.addEventListener('DOMContentLoaded', () => {
     return rowMap;
   }
 
-  function syncMissingEditorFromPreview(preview, rowNumbers, columns, summary) {
+  function remainingMissingCellSetFromAnalysis(analysis) {
+    const cells = new Set();
+    if (!analysis || !Array.isArray(analysis.missing_rows)) return cells;
+    analysis.missing_rows.forEach(row => {
+      const rowNumber = String(row.row_number || row.data_row_number || '');
+      if (!rowNumber) return;
+      (row.missing_columns || []).forEach(column => {
+        cells.add(`${rowNumber}::${normalizeColumnName(column)}`);
+      });
+    });
+    return cells;
+  }
+
+  function syncMissingEditorFromPreview(preview, rowNumbers, columns, summary, analysis) {
     if (!missingEditorRows.length) return;
     const rowMap = rowMapFromPreview(preview, rowNumbers);
     const availableRows = new Set(rowMap.keys());
+    const remainingCells = remainingMissingCellSetFromAnalysis(analysis);
+    const hasExactRemainingCells = remainingCells.size > 0;
     const remainingColumns = new Set(
       ((summary && summary.missing_by_column_remaining) || []).map(item => normalizeColumnName(item.column))
     );
@@ -1067,15 +1098,21 @@ document.addEventListener('DOMContentLoaded', () => {
         if (nextValue === undefined) return;
         const input = cell.querySelector('input');
         const columnStillMissing = remainingColumns.has(normalizeColumnName(column));
+        const cellStillMissing = hasExactRemainingCells
+          ? remainingCells.has(`${String(rowNumber || '')}::${normalizeColumnName(column)}`)
+          : columnStillMissing;
 
         if (input) {
-          input.value = nextValue;
-          if (nextValue || noMissingRemain || !columnStillMissing) {
+          delete input.dataset.userTyped;
+          const hasDisplayValue = nextValue !== undefined && nextValue !== null && String(nextValue) !== '';
+          const handled = noMissingRemain || !cellStillMissing;
+          input.value = handled ? nextValue : '';
+          if (handled) {
             input.removeAttribute('name');
             input.disabled = true;
             input.classList.remove('is-edited');
             input.classList.add('is-synced');
-            input.placeholder = nextValue ? '' : 'Handled';
+            input.placeholder = hasDisplayValue ? '' : 'Handled';
           } else {
             input.disabled = false;
             input.classList.remove('is-synced');
@@ -1552,14 +1589,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     missingEditorRows = Array.from(tbody.querySelectorAll('tr'));
     missingCellInputs = Array.from(tbody.querySelectorAll('.missing-cell-edit input'));
-    const updateStatus = () => {
-      if (!missingEditorStatus) return;
-      const count = missingCellInputs.filter(input => input.value.trim() !== '').length;
-      missingEditorStatus.textContent = count ? `${count} typed value${count === 1 ? '' : 's'} ready.` : 'No typed values yet.';
-      missingEditorStatus.classList.toggle('has-edits', count > 0);
-    };
-    missingCellInputs.forEach(input => input.addEventListener('input', updateStatus));
-    updateStatus();
+    missingCellInputs.forEach(input => {
+      delete input.dataset.userTyped;
+      bindMissingInput(input);
+    });
+    syncMissingEditorStatus();
   }
 
   function rebuildAuthoritativeCleaningCandidates(analysis) {
@@ -1738,6 +1772,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function addSelectedOutliersToFormData(formData) {
     formData.delete('selected_outlier_rows');
+    formData.delete('selected_outlier_records');
     const section = document.getElementById('outlierPreviewSection');
     if (section && section.style.display !== 'none') {
       const checkedBoxes = Array.from(document.querySelectorAll('.outlier-checkbox:checked'));
@@ -1746,6 +1781,10 @@ document.addEventListener('DOMContentLoaded', () => {
         .filter(Boolean)));
       if (checked.length > 0) {
         formData.append('selected_outlier_rows', JSON.stringify(checked));
+        const records = checkedBoxes.map(cb => {
+          try { return JSON.parse(cb.dataset.record || '{}'); } catch (e) { return {}; }
+        }).filter(record => record && (record.column || record.value !== undefined || record.row_number));
+        if (records.length) formData.append('selected_outlier_records', JSON.stringify(records));
       }
     }
   }
@@ -1756,7 +1795,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!scopeRoot) return { set, remove };
     scopeRoot.querySelectorAll('[name]').forEach(el => {
       if (!el.name || el.disabled || el.type === 'button' || el.type === 'submit') return;
-      if (el.name.startsWith('missing_cell[') && String(el.value || '').trim() === '') return;
+      if (el.name.startsWith('missing_cell[') && !isUserTypedMissingInput(el)) return;
       if (el.type === 'checkbox' || el.type === 'radio') {
         if (el.checked) set.set(el.name, el.value);
         else remove.add(el.name);
@@ -1890,7 +1929,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (group.id === 'missingValuesGroup') {
       const strategy = group.querySelector('#missingStrategySelect')?.value || 'ignore';
-      const typedValues = Array.from(group.querySelectorAll('input[name^="missing_cell["]')).some(input => input.value.trim() !== '');
+      const typedValues = Array.from(group.querySelectorAll('input[name^="missing_cell["]')).some(isUserTypedMissingInput);
       if (strategy === 'ignore' && !typedValues) {
         return { ok: false, message: 'Choose Fill or Drop, or type missing-cell values, before applying Missing Values.' };
       }
@@ -1908,13 +1947,6 @@ document.addEventListener('DOMContentLoaded', () => {
       const selectedOutliers = document.querySelectorAll('.outlier-checkbox:checked').length;
       if (selectedOutliers === 0) {
         return { ok: false, message: 'Preview outliers and select at least one row before applying Outlier Choices.' };
-      }
-    }
-
-    if (group.id === 'advancedGroup') {
-      const hasCheckedToggle = Array.from(group.querySelectorAll('.toggle input[type="checkbox"]')).some(cb => cb.checked);
-      if (!hasCheckedToggle) {
-        return { ok: false, message: 'Turn on at least one Advanced Option before applying the section.' };
       }
     }
 
@@ -2372,8 +2404,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (op.action === 'manual_outlier_removal') return (op.rows_removed || 0) > 0 || (op.selected_rows || op.valid_indices_dropped || []).length > 0;
     if (op.action === 'convert_dtypes') return (op.changes || []).length > 0;
     if (op.action === 'manual_convert_dtypes') return Object.keys(op.changes || {}).length > 0;
-    if (op.action === 'manual_column_renames') return (op.count || 0) > 0 || Object.keys(op.renamed_map || {}).length > 0;
-    if (op.action === 'label_encode') return (op.columns_encoded || []).length > 0;
+    if (op.action === 'manual_column_renames') return false;
+    if (op.action === 'label_encode') return false;
     if (op.action === 'custom_pandas_code') return true;
     return true;
   }
@@ -2398,8 +2430,8 @@ document.addEventListener('DOMContentLoaded', () => {
     outlierGroup:       new Set(['manual_outlier_removal','outlier_removal','outlier_clip']),
     dataIntegrityGroup: new Set(['drop_duplicates','drop_empty_columns','drop_constant_columns','trim_whitespace']),
     dataTypesGroup:     new Set(['convert_dtypes','manual_convert_dtypes']),
-    datasetEditorSlide: new Set(['manual_cell_updates','manual_column_renames']),
-    advancedGroup:      new Set(['label_encode','manual_cell_updates','manual_column_renames','drop_selected_columns']),
+    datasetEditorSlide: new Set(['manual_cell_updates']),
+    dropSelectedColumnsGroup: new Set(['drop_selected_columns']),
     customCodeGroup:    new Set(['custom_pandas_code']),
     // typed missing-cell values use 'manual' scope
     manual:             new Set(['manual_missing_cell_updates','fill_numeric','fill_categorical']),
@@ -2804,6 +2836,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // can rebuild the exact same "View Full Changes" detail instead of a blank stub.
       const previewHTML = window._ido._lastLoggedPreviewHTML || '';
       window._ido._lastLoggedPreviewHTML = '';
+      const appliedAtMs = Number(extraConfig && extraConfig.applied_at_ms) || Date.now();
       return fetch('/log_action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2815,6 +2848,7 @@ document.addEventListener('DOMContentLoaded', () => {
             formSnapshot:          formSnap,
             activePanelId:         activePanel ? activePanel.id : null,
             previewHTML,
+            applied_at_ms:         appliedAtMs,
             ...(extraConfig || {}),
           },
           rows_before:   summary ? (summary.rows_before || 0) : 0,
@@ -2915,8 +2949,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // the user is still adjusting a toggle — only real Applies touch the
     // persistent current-state snapshot and generate an undo/redo manifest.
     if (persistApply) {
+      const appliedAtMs = Date.now();
       formData.append('persist_apply', '1');
       formData.append('operation_token', 'op_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10));
+      formData.append('client_applied_at_ms', String(appliedAtMs));
       formData.append('action_name', actionLabel || 'Apply cleaning action');
       formData.append('action_scope', window._ido.currentHistoryScope || scopeName || 'all');
     }
@@ -3033,7 +3069,8 @@ document.addEventListener('DOMContentLoaded', () => {
         data.preview,
         data.report && data.report.preview_row_numbers,
         data.report && data.report.cleaned_columns,
-        data.summary
+        data.summary,
+        data.analysis
       );
       updateMissingReviewState(data.summary);
       if (data.summary) window._ido.lastSummary = data.summary;
@@ -3137,6 +3174,7 @@ document.addEventListener('DOMContentLoaded', () => {
               {
                 ownEntries: _ownLedgerEntries,
                 preview: config.preview,
+                ts: Number(config.applied_at_ms) || undefined,
                 dbHistoryId: entry.id,
                 hasManifest: !!entry.has_manifest,
               }
@@ -3193,7 +3231,7 @@ document.addEventListener('DOMContentLoaded', () => {
     applyTypedPreviewBtn.addEventListener('click', () => {
       const editor = document.querySelector('.wide-missing-editor');
       const typedValues = editor
-        ? Array.from(editor.querySelectorAll('input[name^="missing_cell["]')).filter(input => input.value.trim() !== '')
+        ? Array.from(editor.querySelectorAll('input[name^="missing_cell["]')).filter(isUserTypedMissingInput)
         : [];
       if (typedValues.length === 0) {
         if (liveActionLog) {
@@ -3217,7 +3255,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       const dirtyChanges = grid ? grid.getChanges() : [];
       const editedCells = datasetEditInputs.filter(input => input.value !== input.dataset.original);
-      const renamedColumns = datasetColumnInputs.filter(input => input.value !== input.dataset.original);
+      const renamedColumns = [];
 
       if (dirtyChanges.length === 0 && editedCells.length === 0 && renamedColumns.length === 0) {
         if (liveActionLog) {
@@ -3234,6 +3272,7 @@ document.addEventListener('DOMContentLoaded', () => {
       fd.append('preview_scope', 'manual');
       fd.append('persist_apply', '1');
       fd.append('operation_token', 'op_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10));
+      fd.append('client_applied_at_ms', String(Date.now()));
       fd.append('action_name', 'Dataset edits');
       fd.append('action_scope', 'datasetEditorSlide');
       // Read directly from the grid's own dirty-cell tracking at click time —
@@ -3279,7 +3318,7 @@ document.addEventListener('DOMContentLoaded', () => {
             );
           }
           renderLiveMetrics(data.summary);
-          syncMissingEditorFromPreview(data.preview, data.report && data.report.preview_row_numbers, data.report && data.report.cleaned_columns, data.summary);
+          syncMissingEditorFromPreview(data.preview, data.report && data.report.preview_row_numbers, data.report && data.report.cleaned_columns, data.summary, data.analysis);
           updateMissingReviewState(data.summary);
           if (data.summary) window._ido.lastSummary = data.summary;
           renderLiveLog(data.report.operations, 'Applied: edited dataset cells');
@@ -3305,6 +3344,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (window._ido && window._ido.pushAppliedHistory) {
               createdActions = window._ido.pushAppliedHistory('Dataset edits', previousPreviewState, capturePreviewState(), editOps, 'datasetEditorSlide', {
                 preview: serverConfig && serverConfig.preview,
+                ts: Number(serverConfig && serverConfig.applied_at_ms) || undefined,
                 dbHistoryId: serverHistory.id,
                 hasManifest: !!(serverHistory && serverHistory.has_manifest),
               }) || [];
@@ -3539,7 +3579,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }));
             const tr = document.createElement('tr');
             tr.innerHTML = `
-              <td><input type="checkbox" class="outlier-checkbox" data-row-id="${escapeHtml(String(row.row_index))}" data-row="${escapeHtml(String(row.row_index))}"></td>
+              <td><input type="checkbox" class="outlier-checkbox" data-row-id="${escapeHtml(String(row.row_index))}" data-row="${escapeHtml(String(row.row_index))}" data-record="${recordPayload}"></td>
               <td>${row.row_number || (row.row_position + 1)}</td>
               <td>${escapeHtml(row.column)}</td>
               <td>${displayValue}</td>
@@ -3681,7 +3721,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window._ido.renderLiveMetrics) window._ido.renderLiveMetrics(data.summary);
     window._ido.lastAnalysis = data.analysis || window._ido.lastAnalysis;
     if (data.analysis && window._ido.updateUI) window._ido.updateUI(data.analysis);
-    if (window._ido.syncMissingEditorFromPreview) window._ido.syncMissingEditorFromPreview(data.preview, data.report && data.report.preview_row_numbers, data.report && data.report.cleaned_columns, data.summary);
+    if (window._ido.syncMissingEditorFromPreview) window._ido.syncMissingEditorFromPreview(data.preview, data.report && data.report.preview_row_numbers, data.report && data.report.cleaned_columns, data.summary, data.analysis);
     if (window._ido.updateMissingReviewState) window._ido.updateMissingReviewState(data.summary);
     if (data.summary) window._ido.lastSummary = data.summary;
     return true;
@@ -3774,7 +3814,8 @@ document.addEventListener('DOMContentLoaded', () => {
     outlierGroup:       { label: 'Outliers',           icon: '📊' },
     dataIntegrityGroup: { label: 'Data Integrity',     icon: '🔧' },
     dataTypesGroup:     { label: 'Data Types',         icon: '🔄' },
-    advancedGroup:      { label: 'Advanced Options',   icon: '⚙️' },
+    datasetEditorSlide: { label: 'Dataset Cell Edits', icon: '✏️' },
+    dropSelectedColumnsGroup: { label: 'Drop Selected Columns', icon: '🧹' },
     customCodeGroup:    { label: 'Custom Pandas Code', icon: '🐍' },
   };
 
@@ -3785,17 +3826,10 @@ document.addEventListener('DOMContentLoaded', () => {
       drop_constant_columns: { key: 'dropConstantColumns', label: 'Drop Constant Columns' },
       trim_whitespace:       { key: 'trimWhitespace', label: 'Trim Whitespace' },
     },
-    advancedGroup: {
-      label_encode:          { key: 'labelEncoding', label: 'Label Encoding' },
-      manual_cell_updates:   { key: 'datasetCellEdits', label: 'Dataset Cell Edits' },
-      manual_column_renames: { key: 'columnRenames', label: 'Column Renames' },
-      drop_selected_columns: { key: 'dropSelectedColumns', label: 'Drop Selected Columns' },
-    },
   };
 
   const PERMANENT_SUBFEATURES = {
     dataIntegrityGroup: ['removeDuplicateRows','dropEmptyColumns','dropConstantColumns','trimWhitespace'],
-    advancedGroup: ['labelEncoding','datasetCellEdits','columnRenames','dropSelectedColumns'],
   };
 
   function subfeatureMeta(scope, key) {
@@ -3803,7 +3837,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function canonicalHistoryScope(scope) {
-    return scope === 'datasetEditorSlide' ? 'advancedGroup' : scope;
+    return scope;
   }
 
   function scopeLabel(scope) {
@@ -3819,7 +3853,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // only). Membership itself now comes from SCOPE_OP_MAP — one list, not two.
   const SCOPE_PRIORITY_ORDER = [
     'outlierGroup', 'missingValuesGroup', 'dataTypesGroup',
-    'customCodeGroup', 'advancedGroup', 'dataIntegrityGroup',
+    'customCodeGroup', 'datasetEditorSlide', 'dropSelectedColumnsGroup', 'dataIntegrityGroup',
   ];
 
   function scopeForOperations(operations, fallbackLabel = '') {
@@ -3832,7 +3866,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (lbl.includes('outlier')) return 'outlierGroup';
     if (lbl.includes('missing') || lbl.includes('fill')) return 'missingValuesGroup';
     if (lbl.includes('type')) return 'dataTypesGroup';
-    if (lbl.includes('edit') || lbl.includes('rename')) return 'advancedGroup';
+    if (lbl.includes('drop selected') || lbl.includes('drop column')) return 'dropSelectedColumnsGroup';
+    if (lbl.includes('edit') || lbl.includes('rename')) return 'datasetEditorSlide';
     return window._ido.currentHistoryScope || 'dataIntegrityGroup';
   }
   window._ido.scopeForOperations = scopeForOperations; // exposed for testing/verification only
@@ -3868,6 +3903,11 @@ document.addEventListener('DOMContentLoaded', () => {
   function _fmt(ts) {
     if (!ts) return '';
     return new Date(ts).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  }
+  function _historyTs(entry, config) {
+    const ms = Number(config && config.applied_at_ms);
+    if (Number.isFinite(ms) && ms > 0) return ms;
+    return entry && entry.applied_at ? new Date(entry.applied_at).getTime() : Date.now();
   }
   function _esc(s) {
     return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -4293,6 +4333,57 @@ document.addEventListener('DOMContentLoaded', () => {
     return values.join(' | ') || 'Row present';
   }
 
+  function _outlierRecordsHtml(operations) {
+    const records = (operations || [])
+      .filter(op => op && op.action === 'manual_outlier_removal')
+      .flatMap(op => (op.selected_records || []).map(record => ({ op, record })));
+    if (!records.length) return '';
+
+    const byRow = new Map();
+    records.forEach(({ op, record }) => {
+      const key = String(record.row_index ?? record.row_number ?? byRow.size);
+      if (!byRow.has(key)) byRow.set(key, { op, records: [], rowData: record.row_data || {}, rowNumber: record.row_number });
+      byRow.get(key).records.push(record);
+    });
+
+    const rows = Array.from(byRow.values()).slice(0, 8).map(item => {
+      const values = item.records.map(record => {
+        const column = record.column || 'value';
+        const value = record.value === null || record.value === undefined ? 'Missing' : String(record.value);
+        return `<span class="cl-outlier-value"><strong>${_esc(column)}</strong>: ${_esc(value)}</span>`;
+      }).join('');
+      const rowData = item.rowData || {};
+      const context = Object.entries(rowData)
+        .filter(([column, value]) =>
+          value !== null && value !== undefined && value !== '' &&
+          !item.records.some(record => String(record.column) === String(column))
+        )
+        .slice(0, 3)
+        .map(([column, value]) => `<span><strong>${_esc(column)}</strong>: ${_esc(String(value))}</span>`)
+        .join('');
+      const method = String(item.op.method || 'iqr').toLowerCase() === 'user_selection'
+        ? 'Selected from IQR outlier preview'
+        : 'IQR outlier rule';
+      return `<tr>
+        <td>Row ${_esc(item.rowNumber || '')}</td>
+        <td>${values || '<span class="cl-muted">Outlier value recorded</span>'}</td>
+        <td>${_esc(method)}</td>
+        <td><div class="cl-outlier-context">${context || '<span class="cl-muted">Exact row removed</span>'}</div></td>
+        <td class="cl-ba-after">Removed</td>
+      </tr>`;
+    }).join('');
+    const total = byRow.size;
+    const note = total > 8 ? `<div class="cl-preview-note">Showing 8 of ${total} removed outlier rows. Use View Full Changes for more detail.</div>` : '';
+    return `<div class="cl-outlier-preview">
+      <div class="cl-outlier-title">Removed outlier rows</div>
+      <table class="cl-outlier-table">
+        <thead><tr><th>Uploaded row</th><th>Outlier value</th><th>Why removed</th><th>Row context</th><th>After</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${note}
+    </div>`;
+  }
+
   function _operationColumns(op) {
     const columns = new Set();
     ['columns', 'columns_processed', 'columns_dropped', 'columns_encoded'].forEach(key => {
@@ -4320,7 +4411,7 @@ document.addEventListener('DOMContentLoaded', () => {
       after_columns: source.after_columns,
       limit: source.limit,
       total_affected_rows: source.total_affected_rows,
-      changed_cells: [], removed_rows: [], added_rows: [], removed_columns: [], added_columns: [],
+      changed_cells: [], removed_rows: [], added_rows: [], removed_columns: [], added_columns: [], dtype_changes: [],
     };
     const rowRemovals = new Set(['drop_duplicates', 'drop_missing_rows', 'manual_outlier_removal', 'outlier_removal']);
     const columnRemovals = new Set(['drop_empty_columns', 'drop_constant_columns', 'drop_selected_columns']);
@@ -4338,6 +4429,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } else {
       const columns = _operationColumns(op);
       result.changed_cells = (source.changed_cells || []).filter(item => !columns.size || columns.has(String(item.column)));
+      result.dtype_changes = (source.dtype_changes || []).filter(item => !columns.size || columns.has(String(item.column)));
       if (action === 'manual_column_renames') {
         result.removed_columns = (source.removed_columns || []).slice();
         result.added_columns = (source.added_columns || []).slice();
@@ -4350,6 +4442,7 @@ document.addEventListener('DOMContentLoaded', () => {
       total_added_rows: Number(source.total_added_rows || result.added_rows.length || 0),
       total_removed_columns: Number(source.total_removed_columns || result.removed_columns.length || 0),
       total_added_columns: Number(source.total_added_columns || result.added_columns.length || 0),
+      total_dtype_changes: Number(source.total_dtype_changes || result.dtype_changes.length || 0),
     };
     if (action === 'drop_duplicates') counts.total_removed_rows = Number(op.removed_rows || result.removed_rows.length);
     else if (action === 'drop_missing_rows') counts.total_removed_rows = Number(op.dropped_row_count || result.removed_rows.length);
@@ -4362,7 +4455,7 @@ document.addEventListener('DOMContentLoaded', () => {
         : Number(source.total_affected_rows || 0);
     }
     Object.assign(result, counts);
-    result.displayed_change_count = ['changed_cells', 'removed_rows', 'added_rows', 'removed_columns', 'added_columns']
+    result.displayed_change_count = ['changed_cells', 'removed_rows', 'added_rows', 'removed_columns', 'added_columns', 'dtype_changes']
       .reduce((total, key) => total + result[key].length, 0);
     result.total_change_count = Object.values(counts).reduce((total, value) => total + value, 0);
     result.is_sample = result.displayed_change_count < result.total_change_count;
@@ -4373,6 +4466,31 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!preview || typeof preview !== 'object') return '';
     const removedColumns = Array.isArray(preview.removed_columns) ? preview.removed_columns : [];
     const addedColumns = Array.isArray(preview.added_columns) ? preview.added_columns : [];
+    const dtypeChanges = Array.isArray(preview.dtype_changes) ? preview.dtype_changes : [];
+    const dtypeOnly = dtypeChanges.length
+      && !(preview.changed_cells || []).length
+      && !(preview.removed_rows || []).length
+      && !(preview.added_rows || []).length
+      && !removedColumns.length
+      && !addedColumns.length;
+    if (dtypeOnly) {
+      const body = dtypeChanges.slice(0, Math.max(rowLimit, 8)).map(item => `<tr>
+        <td class="cl-ba-context">${_esc(item.column || '')}</td>
+        <td class="cl-ba-before"><code class="cl-dtype">${_esc(item.before || '-')}</code></td>
+        <td class="cl-ba-direction" aria-hidden="true">-&gt;</td>
+        <td class="cl-ba-after"><code class="cl-dtype cl-dtype-new">${_esc(item.after || '-')}</code></td>
+      </tr>`).join('');
+      const totalTypes = preview.total_dtype_changes || dtypeChanges.length;
+      const note = dtypeChanges.length < totalTypes
+        ? `<div class="cl-preview-note">Showing ${dtypeChanges.length} of ${totalTypes} type changes.</div>`
+        : '';
+      return `<div class="cl-ba-wrap cl-authoritative-preview">
+        <table class="cl-ba-table">
+          <thead><tr><th>Column</th><th>Before type</th><th aria-label="Direction"></th><th>After type</th></tr></thead>
+          <tbody>${body}</tbody>
+        </table>${note}
+      </div>`;
+    }
     const structuralColumnOnly = (removedColumns.length || addedColumns.length)
       && !(preview.changed_cells || []).length
       && !(preview.removed_rows || []).length
@@ -4542,6 +4660,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const affectedRows = Number(preview.total_affected_rows || 0) || Math.max(affectedRowIds.size, structuralRows);
     if (affectedRows) facts.push(['Affected rows', String(affectedRows)]);
     if (preview.total_changed_cells) facts.push(['Changed cells', String(preview.total_changed_cells)]);
+    if (preview.total_dtype_changes) {
+      const dtypeList = (preview.dtype_changes || [])
+        .map(item => `${item.column}: ${item.before} -> ${item.after}`)
+        .slice(0, 6);
+      facts.push(['Type changes', dtypeList.length ? dtypeList.join(', ') : String(preview.total_dtype_changes)]);
+    }
     if (preview.total_removed_columns) facts.push(['Removed columns', String(preview.total_removed_columns)]);
     if (preview.total_added_columns) facts.push(['Added columns', String(preview.total_added_columns)]);
     return facts.length ? `<dl class="cl-action-facts">${facts.map(([key, value]) =>
@@ -4577,8 +4701,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // If we have the rich step-preview HTML (detailed row-level before/after from renderStepPreview),
     // show it inside the card. Fall back to the compact _buildOpBeforeAfterHtml only if absent.
     let previewSection = '';
+    const outlierPreview = _outlierRecordsHtml(visibleOps);
     const persistedPreview = _buildPersistedPreviewHtml(action.preview);
-    if (persistedPreview) {
+    if (outlierPreview) {
+      previewSection = outlierPreview;
+    } else if (persistedPreview) {
       previewSection = persistedPreview;
     } else if (action.previewHTML && action.previewHTML.trim()) {
       // Wrap in a container that strips the Undo/Reapply buttons (the card's own buttons handle those)
@@ -4623,12 +4750,52 @@ document.addEventListener('DOMContentLoaded', () => {
     return el;
   }
 
+  function _dtypeChangesFromOperations(operations) {
+    const rows = [];
+    (operations || []).forEach(op => {
+      if (!op || op.action === undefined) return;
+      if (op.action === 'convert_dtypes') {
+        (op.changes || []).forEach(item => {
+          rows.push({
+            column: item.column || '',
+            before: item.original_dtype || item.from || '-',
+            after: item.new_dtype || item.to || '-',
+          });
+        });
+      } else if (op.action === 'manual_convert_dtypes') {
+        Object.entries(op.changes || {}).forEach(([column, item]) => {
+          const info = item && typeof item === 'object' ? item : {};
+          rows.push({
+            column,
+            before: info.from || info.original_dtype || '-',
+            after: info.to || info.new_dtype || info.actual_dtype || String(item || '-'),
+          });
+        });
+      }
+    });
+    return rows.filter(item => item.column || item.before !== '-' || item.after !== '-');
+  }
+
   function _openPersistedFullChanges(action, displayNum) {
-    const preview = action.preview || {};
+    const preview = Object.assign({}, action.preview || {});
+    if (!(preview.dtype_changes || []).length) {
+      const synthesizedDtypes = _dtypeChangesFromOperations(action.operations || []);
+      if (synthesizedDtypes.length) {
+        preview.dtype_changes = synthesizedDtypes;
+        preview.total_dtype_changes = synthesizedDtypes.length;
+      }
+    }
     const previewSampled = _previewIsSampled(preview);
     const detailTitle = previewSampled ? 'Persisted Preview Sample' : 'Full Changes';
     const removedColumns = Array.isArray(preview.removed_columns) ? preview.removed_columns : [];
     const addedColumns = Array.isArray(preview.added_columns) ? preview.added_columns : [];
+    const dtypeChanges = Array.isArray(preview.dtype_changes) ? preview.dtype_changes : [];
+    const dtypeOnly = dtypeChanges.length
+      && !(preview.changed_cells || []).length
+      && !(preview.removed_rows || []).length
+      && !(preview.added_rows || []).length
+      && !removedColumns.length
+      && !addedColumns.length;
     const structuralColumnOnly = (removedColumns.length || addedColumns.length)
       && !(preview.changed_cells || []).length
       && !(preview.removed_rows || []).length
@@ -4639,6 +4806,11 @@ document.addEventListener('DOMContentLoaded', () => {
     (preview.added_rows || []).forEach(item => entries.push({ location: `Row ${item.row_number}`, before: 'Not present', after: _compactRowEvidence(item.data) }));
     removedColumns.forEach(item => entries.push({ location: String(item.column), before: 'Column existed', after: 'Dropped' }));
     addedColumns.forEach(item => entries.push({ location: String(item.column), before: 'Not present', after: 'Added' }));
+    dtypeChanges.forEach(item => entries.push({
+      location: `Column ${item.column} | Data type`,
+      before: item.before,
+      after: item.after,
+    }));
 
     const operations = action.operations || [];
     const warnings = operations.flatMap(op => op.warnings || []);
@@ -4661,6 +4833,7 @@ document.addEventListener('DOMContentLoaded', () => {
         <span>${preview.total_added_rows || 0} rows added</span>
         <span>${preview.total_removed_columns || 0} columns removed</span>
         <span>${preview.total_added_columns || 0} columns added</span>
+        <span>${preview.total_dtype_changes || 0} type changes</span>
       </div>
       <div class="cl-full-body">
         <div class="cl-full-table-wrap"><table class="cl-full-table">
@@ -4728,7 +4901,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const close = () => modal.remove();
     modal.querySelector('.cl-full-close').addEventListener('click', close);
     modal.addEventListener('click', event => { if (event.target === modal) close(); });
-    if (structuralColumnOnly) {
+    if (dtypeOnly || structuralColumnOnly) {
       tableWrap.innerHTML = _buildPersistedPreviewHtml(preview, 25)
         || '<div class="cl-full-empty">No detailed persisted values are available for this action.</div>';
       pageHost.innerHTML = '';
@@ -5177,9 +5350,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const cards = [];
     const actions = [];
     operationList.forEach(op => {
-      let operationScope = opts.activePanelId
-        ? canonicalHistoryScope(opts.activePanelId)
-        : canonicalHistoryScope(scopeForOperations([op], label));
+      const detectedScope = canonicalHistoryScope(scopeForOperations([op], label));
+      const activeScope = opts.activePanelId ? canonicalHistoryScope(opts.activePanelId) : null;
+      const activeOwnsOperation = !!(activeScope && window._ido.SCOPE_OP_MAP &&
+        window._ido.SCOPE_OP_MAP[activeScope] &&
+        window._ido.SCOPE_OP_MAP[activeScope].has(op.action));
+      let operationScope = activeOwnsOperation ? activeScope : detectedScope;
       if (!SCOPE_META[operationScope]) operationScope = scope;
       if (!SCOPE_META[operationScope]) operationScope = 'dataIntegrityGroup';
       const fb = _getOrCreateFeatureBlock(operationScope);
@@ -5244,7 +5420,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ── Compatibility stubs ───────────────────────────────────────────────
   function _initializeChangeLogTree() {
     if (!changeLogBlocksContainer) return;
-    ['dataIntegrityGroup','missingValuesGroup','dataTypesGroup','outlierGroup','advancedGroup','customCodeGroup'].forEach(scope => {
+    ['dataIntegrityGroup','missingValuesGroup','dataTypesGroup','outlierGroup','datasetEditorSlide','dropSelectedColumnsGroup','customCodeGroup'].forEach(scope => {
       const fb = _getOrCreateFeatureBlock(scope);
       if (PERMANENT_SUBFEATURES[scope]) {
         if (fb.emptyEl) fb.emptyEl.style.display = 'none';
@@ -5512,6 +5688,7 @@ df.isna().sum()">${_esc(cell.code)}</textarea>
       const fd = window._ido.mapToFormData(new Map([[codeKey, code]]), 'feature');
       fd.append('persist_apply', '1');
       fd.append('operation_token', 'op_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10));
+      fd.append('client_applied_at_ms', String(Date.now()));
       fd.append('action_name', 'Custom code: ' + histLabel);
       fd.append('action_scope', 'customCodeGroup');
       const snap = _captureSnap();
@@ -5540,7 +5717,7 @@ df.isna().sum()">${_esc(cell.code)}</textarea>
         );
       }
       if (window._ido.renderLiveMetrics)           window._ido.renderLiveMetrics(data.summary);
-      if (window._ido.syncMissingEditorFromPreview) window._ido.syncMissingEditorFromPreview(data.preview, data.report?.preview_row_numbers, data.report?.cleaned_columns, data.summary);
+      if (window._ido.syncMissingEditorFromPreview) window._ido.syncMissingEditorFromPreview(data.preview, data.report?.preview_row_numbers, data.report?.cleaned_columns, data.summary, data.analysis);
       if (window._ido.updateMissingReviewState)    window._ido.updateMissingReviewState(data.summary);
       if (data.summary) window._ido.lastSummary = data.summary;
       if (window._ido.renderLiveLog)               window._ido.renderLiveLog(data.report?.operations, 'Applied: ' + histLabel);
@@ -5571,6 +5748,7 @@ df.isna().sum()">${_esc(cell.code)}</textarea>
       const createdActions = pushAppliedHistory(histLabel, snap, _captureSnap(), data.report?.operations, 'customCodeGroup', {
         ownEntries: customCodeOwnEntries,
         preview: serverConfig && serverConfig.preview,
+        ts: Number(serverConfig && serverConfig.applied_at_ms) || undefined,
         dbHistoryId: serverHistory && serverHistory.id,
         hasManifest: !!(serverHistory && serverHistory.has_manifest),
       }) || [];
@@ -5689,7 +5867,7 @@ df.isna().sum()">${_esc(cell.code)}</textarea>
       }
       if (window._ido.syncDatasetEditorFromPreview) window._ido.syncDatasetEditorFromPreview(replayData.preview, replayData.preview_row_numbers, replayData.editor_columns);
       if (window._ido.renderLiveMetrics) window._ido.renderLiveMetrics(replayData.summary);
-      if (window._ido.syncMissingEditorFromPreview) window._ido.syncMissingEditorFromPreview(replayData.preview, replayData.preview_row_numbers, replayData.editor_columns, replayData.summary);
+      if (window._ido.syncMissingEditorFromPreview) window._ido.syncMissingEditorFromPreview(replayData.preview, replayData.preview_row_numbers, replayData.editor_columns, replayData.summary, replayData.analysis);
       if (window._ido.updateMissingReviewState) window._ido.updateMissingReviewState(replayData.summary);
       if (replayData.summary) window._ido.lastSummary = replayData.summary;
       renderLiveLog(replayData.report?.operations, 'Resumed — previous state restored');
@@ -5708,7 +5886,7 @@ df.isna().sum()">${_esc(cell.code)}</textarea>
       const rowsBefore = entry.rows_before || 0;
       const rowsAfter  = entry.rows_after  || 0;
       const cells      = entry.cells_changed || 0;
-      const ts         = entry.applied_at ? new Date(entry.applied_at).getTime() : Date.now();
+      const ts         = _historyTs(entry, config);
       const badge      = [];
       if (rowsBefore !== rowsAfter) badge.push(`${rowsBefore}→${rowsAfter} rows`);
       if (cells > 0) badge.push(`${cells} cells changed`);

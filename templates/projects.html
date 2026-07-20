@@ -93,7 +93,7 @@
     .nav-cta:hover { background: var(--brand-dark); }
 
     /* ── Page ── */
-    .page { max-width: 1100px; margin: 0 auto; padding: 40px 24px 80px; }
+    .page { max-width: 1220px; margin: 0 auto; padding: 40px 24px 80px; }
 
     .page-header {
       display: flex;
@@ -150,8 +150,8 @@
     /* ── Grid ── */
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-      gap: 20px;
+      grid-template-columns: repeat(auto-fit, minmax(430px, 1fr));
+      gap: 24px;
     }
 
     /* ── Card ── */
@@ -161,6 +161,7 @@
       border-radius: var(--radius);
       display: flex;
       flex-direction: column;
+      min-height: 360px;
       transition: box-shadow .2s, border-color .2s;
       overflow: hidden;
     }
@@ -170,7 +171,7 @@
     }
 
     .card-top {
-      padding: 20px 20px 16px;
+      padding: 24px 24px 18px;
       flex: 1;
     }
 
@@ -179,7 +180,7 @@
       align-items: flex-start;
       justify-content: space-between;
       gap: 10px;
-      margin-bottom: 12px;
+      margin-bottom: 16px;
     }
 
     /* Inline editable project name */
@@ -218,7 +219,7 @@
       color: var(--text-1);
     }
 
-    .card-file { font-size: 12px; color: var(--text-3); margin-top: 3px; }
+    .card-file { font-size: 12px; color: var(--text-3); margin-top: 5px; }
 
     .status-badge {
       display: inline-flex;
@@ -239,7 +240,7 @@
       display: flex;
       flex-wrap: wrap;
       gap: 6px 16px;
-      margin-bottom: 12px;
+      margin-bottom: 16px;
     }
     .meta-pill {
       font-size: 12px;
@@ -258,10 +259,11 @@
       background: var(--bg);
       border-radius: 7px;
       padding: 8px 11px;
-      margin-bottom: 12px;
+      margin-bottom: 16px;
       border: 1px solid var(--border-2);
       cursor: pointer;
       position: relative;
+      min-height: 44px;
     }
     .card-note.empty-note { color: var(--text-3); font-style: italic; }
     .card-note::after {
@@ -300,12 +302,13 @@
 
     /* ── Card actions footer ── */
     .card-footer {
-      padding: 12px 16px;
+      padding: 14px 18px;
       border-top: 1px solid var(--border-2);
       background: #fafaf9;
       display: flex;
       align-items: center;
       gap: 8px;
+      flex-wrap: wrap;
     }
 
     .btn-resume {
@@ -359,6 +362,17 @@
       margin-left: auto;
     }
     .btn-danger:hover { background: #fef2f2; }
+
+    @media (max-width: 560px) {
+      .page { padding: 28px 16px 64px; }
+      .grid { grid-template-columns: 1fr; }
+      .card { min-height: 0; }
+      .card-footer > a,
+      .card-footer > form { flex: 1 1 auto; }
+      .btn-resume,
+      .btn-ghost,
+      .btn-danger { justify-content: center; width: 100%; }
+    }
 
     /* ── Save indicator ── */
     .save-status {
@@ -571,6 +585,7 @@ document.querySelectorAll('.card').forEach(card => {
   }
 });
 </script>
+<script src="{{ url_for('static', filename='desktop_downloads.js', v=static_version('desktop_downloads.js')) }}" defer></script>
 
 </body>
 </html>

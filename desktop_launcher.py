@@ -17,10 +17,14 @@ security behavior remain in ``app.py``.
 """
 
 import logging
+import base64
+import os
+import re
 import socket
 import sys
 import threading
 import time
+import uuid
 
 import webview
 
@@ -31,6 +35,116 @@ import app as flask_app_module
 APP_TITLE = "inDataOut — Data Cleaning"
 WINDOW_WIDTH = 1400
 WINDOW_HEIGHT = 900
+
+
+class DesktopExportApi:
+    """Native save bridge for pywebview, whose WebView2 shell has no download UI."""
+
+    def __init__(self) -> None:
+        self._open_exports: dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _safe_filename(name: str) -> str:
+        cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(name or "").strip())
+        cleaned = cleaned.strip(" .")
+        return cleaned or "indataout_export.csv"
+
+    @staticmethod
+    def _downloads_dir() -> str:
+        home = os.path.expanduser("~")
+        path = os.path.join(home, "Downloads")
+        return path if os.path.isdir(path) else home
+
+    @staticmethod
+    def _file_types(filename: str) -> tuple[str, ...]:
+        ext = os.path.splitext(filename)[1].lower()
+        if ext == ".json":
+            return ("JSON report (*.json)", "All files (*.*)")
+        if ext == ".csv":
+            return ("CSV file (*.csv)", "All files (*.*)")
+        return ("All files (*.*)",)
+
+    def begin_export(self, filename: str) -> dict:
+        window = webview.active_window()
+        if window is None:
+            return {"ok": False, "error": "Desktop window is not ready."}
+
+        safe_name = self._safe_filename(filename)
+        try:
+            selected = window.create_file_dialog(
+                webview.FileDialog.SAVE,
+                directory=self._downloads_dir(),
+                save_filename=safe_name,
+                file_types=self._file_types(safe_name),
+            )
+        except Exception as exc:
+            logging.exception("Desktop save dialog failed")
+            return {"ok": False, "error": f"Could not open Save As dialog: {exc}"}
+
+        if not selected:
+            return {"ok": False, "cancelled": True}
+        path = selected[0] if isinstance(selected, (list, tuple)) else selected
+        if not path:
+            return {"ok": False, "cancelled": True}
+
+        default_ext = os.path.splitext(safe_name)[1]
+        if default_ext and not os.path.splitext(path)[1]:
+            path += default_ext
+
+        export_id = uuid.uuid4().hex
+        try:
+            handle = open(path, "wb")
+        except Exception as exc:
+            logging.exception("Desktop export open failed")
+            return {"ok": False, "error": f"Could not write to that location: {exc}"}
+
+        with self._lock:
+            self._open_exports[export_id] = {"handle": handle, "path": path, "bytes": 0}
+        return {"ok": True, "export_id": export_id}
+
+    def append_export_chunk(self, export_id: str, chunk_base64: str) -> dict:
+        with self._lock:
+            entry = self._open_exports.get(export_id)
+        if not entry:
+            return {"ok": False, "error": "Export session expired."}
+        try:
+            data = base64.b64decode(chunk_base64)
+            entry["handle"].write(data)
+            entry["bytes"] += len(data)
+            return {"ok": True, "bytes": entry["bytes"]}
+        except Exception as exc:
+            logging.exception("Desktop export chunk write failed")
+            return {"ok": False, "error": f"Could not save export data: {exc}"}
+
+    def finish_export(self, export_id: str) -> dict:
+        with self._lock:
+            entry = self._open_exports.pop(export_id, None)
+        if not entry:
+            return {"ok": False, "error": "Export session expired."}
+        try:
+            entry["handle"].close()
+            return {"ok": True, "path": entry["path"], "bytes": entry["bytes"]}
+        except Exception as exc:
+            logging.exception("Desktop export close failed")
+            return {"ok": False, "error": f"Could not finish saving export: {exc}"}
+
+    def abort_export(self, export_id: str) -> dict:
+        with self._lock:
+            entry = self._open_exports.pop(export_id, None)
+        if not entry:
+            return {"ok": True}
+        path = entry.get("path")
+        try:
+            entry["handle"].close()
+        except Exception:
+            pass
+        try:
+            if path and os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            logging.exception("Desktop export cleanup failed")
+        return {"ok": True}
 
 
 def _find_free_port(preferred: int = 5000) -> int:
@@ -97,6 +211,7 @@ def main() -> None:
     webview.create_window(
         APP_TITLE,
         url=f"http://127.0.0.1:{port}/",
+        js_api=DesktopExportApi(),
         width=WINDOW_WIDTH,
         height=WINDOW_HEIGHT,
         min_size=(900, 600),

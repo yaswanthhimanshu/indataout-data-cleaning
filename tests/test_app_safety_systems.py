@@ -265,6 +265,75 @@ class AppSafetySystemsTests(unittest.TestCase):
         self.assertEqual(preview["changed_cells"][0]["before"], " a ")
         self.assertEqual(preview["changed_cells"][0]["after"], "a")
 
+    def test_committed_manual_missing_cell_editor_saves_history_and_snapshot(self):
+        sid, filename, _path = self._seed_project_session_file(content="name,score\nA,\nB,2\n")
+
+        def fake_atomic(**kwargs):
+            kwargs["before_commit"](92)
+            return 92
+
+        with mock.patch.object(app_module.db, "get_cleaning_history", return_value=[]), \
+             mock.patch.object(app_module.db, "log_cleaning_action_atomic", side_effect=fake_atomic):
+            response = self.client.post("/preview_clean", data={
+                "filename": filename,
+                "persist_apply": "1",
+                "preview_scope": "manual",
+                "action_scope": "missingValuesGroup",
+                "action_name": "Applied: typed missing-cell values",
+                "missing_strategy": "ignore",
+                "convert_dtypes": "0",
+                "missing_cell[0][score]": "5",
+            })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        history = payload["history_entry"]
+        self.assertEqual(history["id"], 92)
+        operation = history["action_config"]["operations"][0]
+        self.assertEqual(operation["action"], "manual_missing_cell_updates")
+        self.assertEqual(operation["count"], 1)
+        self.assertEqual(app_module.load_current_snapshot(sid).loc[0, "score"], 5.0)
+
+    def test_committed_manual_dtype_conversion_saves_reversible_dtype_manifest(self):
+        sid, filename, _path = self._seed_project_session_file(content="code,score\nA,1\nB,2\n")
+
+        def fake_atomic(**kwargs):
+            kwargs["before_commit"](93)
+            return 93
+
+        with mock.patch.object(app_module.db, "get_cleaning_history", return_value=[]), \
+             mock.patch.object(app_module.db, "log_cleaning_action_atomic", side_effect=fake_atomic):
+            response = self.client.post("/preview_clean", data={
+                "filename": filename,
+                "persist_apply": "1",
+                "preview_scope": "feature",
+                "action_scope": "dataTypesGroup",
+                "action_name": "Applied feature only: Data Type Conversion",
+                "missing_strategy": "ignore",
+                "convert_dtypes": "0",
+                "dtype_map[score]": "string",
+            })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        history = payload["history_entry"]
+        self.assertEqual(history["id"], 93)
+        operation = history["action_config"]["operations"][0]
+        self.assertEqual(operation["action"], "manual_convert_dtypes")
+        self.assertIn("score", operation["changes"])
+        preview = history["action_config"]["preview"]
+        self.assertEqual(preview["total_dtype_changes"], 1)
+        self.assertEqual(preview["dtype_changes"], [{
+            "column": "score",
+            "before": "int64",
+            "after": "object",
+        }])
+        snapshot = app_module.load_current_snapshot(sid)
+        self.assertEqual(str(snapshot["score"].dtype), "object")
+        self.assertEqual(snapshot["score"].tolist(), ["1", "2"])
+
     def test_grouped_history_splits_operations_into_their_permanent_subfeatures(self):
         history = [
             {
@@ -295,14 +364,26 @@ class AppSafetySystemsTests(unittest.TestCase):
                 "cells_changed": 1,
                 "status": "applied",
             },
+            {
+                "id": 12,
+                "action_name": "drop selected columns",
+                "action_config": {
+                    "activePanelId": "dataIntegrityGroup",
+                    "operations": [{"action": "drop_selected_columns", "count": 1, "columns_dropped": ["legacy"]}],
+                },
+                "rows_before": 2,
+                "rows_after": 2,
+                "cells_changed": 1,
+                "status": "applied",
+            },
         ]
 
         groups = app_module.build_grouped_cleaning_history(history)
         self.assertEqual([group["label"] for group in groups], [
             "Data Integrity", "Missing Values", "Data Types", "Outliers",
-            "Advanced Options", "Custom Pandas Code",
+            "Dataset Cell Edits", "Drop Selected Columns", "Custom Pandas Code",
         ])
-        self.assertEqual(sum(group["action_count"] for group in groups), 3)
+        self.assertEqual(sum(group["action_count"] for group in groups), 4)
         integrity = groups[0]
         self.assertEqual(len(integrity["actions"]), 0)
         duplicate_actions = next(item for item in integrity["subfeatures"] if item["key"] == "removeDuplicateRows")["actions"]
@@ -313,10 +394,14 @@ class AppSafetySystemsTests(unittest.TestCase):
         self.assertEqual(trim_actions[0]["id"], 10)
         self.assertEqual(duplicate_actions[0]["status"], "Undone")
         self.assertEqual(trim_actions[0]["status"], "Undone")
-        advanced = groups[4]
-        cell_edits = next(item for item in advanced["subfeatures"] if item["key"] == "datasetCellEdits")
+        cell_edits = groups[4]
+        self.assertEqual(cell_edits["label"], "Dataset Cell Edits")
         self.assertEqual(len(cell_edits["actions"]), 1)
         self.assertEqual(cell_edits["actions"][0]["local_number"], 1)
+        drop_selected = groups[5]
+        self.assertEqual(drop_selected["label"], "Drop Selected Columns")
+        self.assertEqual(len(drop_selected["actions"]), 1)
+        self.assertEqual(drop_selected["actions"][0]["id"], 12)
 
     def test_combined_integrity_history_has_human_readable_operation_evidence(self):
         history = [{
@@ -382,6 +467,36 @@ class AppSafetySystemsTests(unittest.TestCase):
         self.assertEqual(payload["preview"][0]["name"], "a")
         replay.assert_called_once_with(123)
 
+    def test_manual_missing_editor_resume_sync_uses_exact_missing_analysis(self):
+        script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "script.js")
+        with open(script_path, "r", encoding="utf-8") as handle:
+            script = handle.read()
+
+        self.assertIn("function remainingMissingCellSetFromAnalysis(analysis)", script)
+        self.assertIn("const cellStillMissing = hasExactRemainingCells", script)
+        self.assertIn("input.value = handled ? nextValue : '';", script)
+        self.assertIn(
+            "window._ido.syncMissingEditorFromPreview(replayData.preview, replayData.preview_row_numbers, "
+            "replayData.editor_columns, replayData.summary, replayData.analysis)",
+            script,
+        )
+
+    def test_change_log_action_time_uses_client_timestamp_on_resume(self):
+        script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "script.js")
+        app_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "app.py")
+        with open(script_path, "r", encoding="utf-8") as handle:
+            script = handle.read()
+        with open(app_path, "r", encoding="utf-8") as handle:
+            app_source = handle.read()
+
+        self.assertIn("client_applied_at_ms", script)
+        self.assertIn("applied_at_ms", script)
+        self.assertIn("function _historyTs(entry, config)", script)
+        self.assertIn("const ts         = _historyTs(entry, config);", script)
+        self.assertIn("client_applied_at_ms = int", app_source)
+        self.assertIn('config["applied_at_ms"] = applied_at_ms', app_source)
+        self.assertIn('action_config["applied_at_ms"] = client_applied_at_ms', app_source)
+
     def test_apply_history_failure_preserves_previous_snapshot(self):
         sid, filename, _path = self._seed_project_session_file()
         original = pd.DataFrame({"x": [1, 2, 2], "y": ["A", "B", "B"]})
@@ -445,14 +560,51 @@ class AppSafetySystemsTests(unittest.TestCase):
             response = self.client.get("/projects/99")
         self.assertEqual(response.status_code, 200)
         page = response.get_data(as_text=True)
-        for label in ("Data Integrity", "Missing Values", "Data Types", "Outliers", "Advanced Options", "Custom Pandas Code"):
+        for label in ("Data Integrity", "Missing Values", "Data Types", "Outliers", "Dataset Cell Edits", "Drop Selected Columns", "Custom Pandas Code"):
             self.assertIn(label, page)
+        self.assertNotIn("Advanced Options", page)
         self.assertIn("Remove Duplicate Rows", page)
         self.assertIn("No actions yet", page)
         with self.client.session_transaction() as sess:
             self.assertEqual(sess["upload_sid"], "active_sid")
             self.assertEqual(sess["upload_filename"], "active.csv")
             self.assertEqual(sess["project_id"], 10)
+
+    def test_resume_repairs_source_after_packaged_upload_root_moves(self):
+        with tempfile.TemporaryDirectory() as old_root:
+            old_project_dir = os.path.join(old_root, "project_sid")
+            old_cleaned_dir = os.path.join(old_project_dir, "cleaned")
+            os.makedirs(old_cleaned_dir, exist_ok=True)
+            old_source = os.path.join(old_project_dir, "source.csv")
+            old_cleaned = os.path.join(old_cleaned_dir, "cleaned.csv")
+            with open(old_source, "w", encoding="utf-8") as f:
+                f.write("x,y\n1,A\n2,B\n")
+            with open(old_cleaned, "w", encoding="utf-8") as f:
+                f.write("x,y\n1,A\n")
+            project = {
+                "id": 99,
+                "name": "Project",
+                "notes": "",
+                "original_file": "source.csv",
+                "upload_sid": "project_sid",
+                "file_path": old_cleaned,
+                "row_count": 2,
+                "col_count": 2,
+                "status": "cleaned",
+                "state_version": 0,
+                "created_at": None,
+            }
+            restored = os.path.join(app_module.UPLOAD_FOLDER, "project_sid", "source.csv")
+            self.assertFalse(os.path.exists(restored))
+            with mock.patch.object(app_module.db, "get_project", return_value=project), \
+                 mock.patch.object(app_module.db, "get_cleaning_history", return_value=[]), \
+                 mock.patch.object(app_module.db, "get_dataset_versions", return_value=[]):
+                response = self.client.get("/projects/99/resume")
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(os.path.exists(restored))
+            with self.client.session_transaction() as sess:
+                self.assertEqual(sess["upload_sid"], "project_sid")
+                self.assertEqual(sess["upload_filename"], "source.csv")
 
     def test_uploading_second_project_preserves_first_project_folder(self):
         with mock.patch.object(app_module.db, "create_project", side_effect=[1, 2]):

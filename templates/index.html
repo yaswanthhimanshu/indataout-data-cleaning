@@ -226,7 +226,6 @@
       <a class="rail-link rail-panel-link" href="#missingValuesGroup" data-panel-target="missingValuesGroup">Missing Values</a>
       <a class="rail-link rail-panel-link" href="#dataTypesGroup" data-panel-target="dataTypesGroup">Data Types</a>
       <a class="rail-link rail-panel-link" href="#outlierGroup" data-panel-target="outlierGroup">Outliers</a>
-      <a class="rail-link rail-panel-link" href="#advancedGroup" data-panel-target="advancedGroup">Advanced Options</a>
       {% if custom_code_enabled %}
       <a class="rail-link rail-panel-link" href="#customCodeGroup" data-panel-target="customCodeGroup">Custom Pandas Code</a>
       {% endif %}
@@ -750,33 +749,6 @@
           </div>
           <button type="button" class="btn btn-outline btn-sm section-apply-btn" data-section-name="Outliers">Apply Outlier Choices</button>
         </div><!-- /group 4 -->
-
-        <!-- ── GROUP 5: Advanced ── -->
-        <div class="opt-group" id="advancedGroup">
-          <div class="opt-group-label">⚡ Advanced Options</div>
-
-          <!-- Label Encoding — value="1" so _bool_from_form can parse it correctly -->
-          <div class="opt-item">
-            <div class="opt-toggle-col">
-              <label class="toggle">
-                <input type="hidden" name="encode_categoricals" value="0">
-                <input type="checkbox" name="encode_categoricals" value="1" id="encodeToggle">
-                <span class="toggle-track"><span class="toggle-thumb"></span></span>
-              </label>
-            </div>
-            <div class="opt-info">
-              <div class="opt-header">
-                <span class="opt-name">Label Encode Categorical Columns</span>
-                <span class="badge badge-blue">Optional</span>
-              </div>
-              <div class="opt-desc">Converts text category values into integers: <code>"Red"→0</code>, <code>"Blue"→1</code>, <code>"Green"→2</code>, etc.</div>
-              <div class="opt-why">💡 Required for most ML algorithms that only accept numeric input. <strong>Skip this</strong> if you need human-readable output for analysis or reporting.</div>
-            </div>
-          </div>
-          <button type="button" class="btn btn-ghost btn-sm section-reset-btn" data-section="advancedGroup" data-section-label="Advanced Options">↺ Reset section</button>
-          <button type="button" class="btn btn-outline btn-sm section-apply-btn" data-section-name="Advanced Options">Apply Advanced Options</button>
-
-        </div><!-- /group 5 -->
 
         {% if custom_code_enabled %}
         <!-- Local-only custom Pandas code -->
@@ -1463,6 +1435,7 @@
      data-resumed-project="{{ (analysis.resumed_project if analysis and analysis.resumed_project is defined else {}) | tojson | forceescape }}"
      style="display:none;"></div>
 <script src="{{ url_for('static', filename='script.js', v=static_version('script.js')) }}" defer></script>
+<script src="{{ url_for('static', filename='desktop_downloads.js', v=static_version('desktop_downloads.js')) }}" defer></script>
 <script>
 /* ── Page-level init ── */
 document.addEventListener('DOMContentLoaded', function () {

@@ -804,7 +804,7 @@ def convert_dtypes(df: pd.DataFrame, dtype_map: Optional[Dict[str, str]] = None)
                 df[c] = conv
                 info.update({"to": str(df[c].dtype), "coerced": int(coerced), "parse_method": method_used})
             elif choice == "string":
-                df[c] = df[c].astype(object)
+                df[c] = df[c].map(lambda value: np.nan if pd.isna(value) else str(value)).astype(object)
                 info.update({"to": str(df[c].dtype)})
             elif choice == "category":
                 df[c] = df[c].astype("category")
@@ -1455,6 +1455,11 @@ def clean_dataframe(
         logging.info(f"Valid index labels to remove: {valid_indices}")
 
         if valid_indices:
+            valid_index_keys = {str(value) for value in valid_indices}
+            selected_outlier_records = [
+                record for record in (opts.get("selected_outlier_records") or [])
+                if str(record.get("row_index")) in valid_index_keys
+            ]
             working = working.drop(index=valid_indices)
             outliers_removed_total = len(valid_indices)
             # Always emit the operation so the frontend's appliedVisibleOpsCount
@@ -1469,6 +1474,7 @@ def clean_dataframe(
                 "valid_indices_dropped": valid_indices,
                 "selected_positions": valid_indices,
                 "row_numbers": _row_numbers(valid_indices),
+                "selected_records": selected_outlier_records,
                 "scope_apply": opts.get("outlier_scope_apply", False),
             })
             logging.info(f"Successfully removed {len(valid_indices)} outlier rows")

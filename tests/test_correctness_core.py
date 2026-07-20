@@ -252,6 +252,38 @@ class CleaningCoreCorrectnessTests(unittest.TestCase):
             })
         self.assertEqual(frame["value"].tolist(), [1, 100, 1])
 
+    def test_selected_outlier_records_are_kept_for_change_log_evidence(self):
+        frame = pd.DataFrame({
+            "monthly_spend": [100.0, 120.0, 9999.99],
+            "Customer Name": ["Asha", "Vikram", "Kavya"],
+            "Segment": ["Retail", "SMB", "SMB"],
+        })
+        _cleaned, report = cleaner.clean_dataframe(frame, options={
+            "remove_duplicates": False,
+            "drop_empty_columns": False,
+            "drop_constant_columns": False,
+            "trim_whitespace": False,
+            "convert_dtypes": False,
+            "missing_strategy": "ignore",
+            "selected_outlier_rows": [2],
+            "selected_outlier_records": [{
+                "row_index": 2,
+                "row_number": 3,
+                "column": "monthly_spend",
+                "value": 9999.99,
+                "row_data": {
+                    "monthly_spend": 9999.99,
+                    "Customer Name": "Kavya",
+                    "Segment": "SMB",
+                },
+            }],
+            "outlier_scope_apply": True,
+        })
+        operation = next(item for item in report["operations"] if item["action"] == "manual_outlier_removal")
+        self.assertEqual(operation["rows_removed"], 1)
+        self.assertEqual(operation["selected_records"][0]["column"], "monthly_spend")
+        self.assertEqual(operation["selected_records"][0]["value"], 9999.99)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -108,6 +108,7 @@ def compute_full_diff(before_df: pd.DataFrame, after_df: pd.DataFrame,
         "added_rows":      [],
         "dropped_columns": [],
         "added_columns":   [],
+        "dtype_changes":   [],
         "truncated":       False,
     }
 
@@ -173,6 +174,16 @@ def compute_full_diff(before_df: pd.DataFrame, after_df: pd.DataFrame,
             if cell_limit is not None and n_added >= cell_limit:
                 break
 
+    for col in common_cols:
+        before_dtype = str(before_df[col].dtype)
+        after_dtype = str(after_df[col].dtype)
+        if before_dtype != after_dtype:
+            manifest["dtype_changes"].append({
+                "col": str(col),
+                "before": before_dtype,
+                "after": after_dtype,
+            })
+
     return manifest
 
 
@@ -180,7 +191,7 @@ def manifest_is_empty(manifest: Dict[str, Any]) -> bool:
     if not manifest:
         return True
     return not any(manifest.get(k) for k in
-                   ("changed_cells", "dropped_rows", "added_rows", "dropped_columns", "added_columns"))
+                   ("changed_cells", "dropped_rows", "added_rows", "dropped_columns", "added_columns", "dtype_changes"))
 
 
 # --- applying a manifest ------------------------------------------------------
@@ -225,6 +236,32 @@ def _coerce_to_column_dtype(value, dtype):
     return value
 
 
+def _cast_column_dtype(series: pd.Series, dtype_name: str) -> pd.Series:
+    """Best-effort dtype replay for type-conversion-only actions."""
+    if not dtype_name:
+        return series
+    try:
+        if dtype_name.startswith("datetime64"):
+            return pd.to_datetime(series, errors="coerce")
+        if dtype_name in ("Int64", "Int32", "Int16", "Int8"):
+            return pd.to_numeric(series, errors="coerce").round().astype(dtype_name)
+        if dtype_name in ("int64", "int32", "int16", "int8"):
+            return pd.to_numeric(series, errors="coerce").round().astype(dtype_name)
+        if dtype_name in ("float64", "float32"):
+            return pd.to_numeric(series, errors="coerce").astype(dtype_name)
+        if dtype_name == "boolean":
+            return series.astype("boolean")
+        if dtype_name == "bool":
+            return series.astype(bool)
+        if dtype_name == "category":
+            return series.astype("category")
+        if dtype_name in ("object", "string"):
+            return series.astype("object" if dtype_name == "object" else "string")
+        return series.astype(dtype_name)
+    except Exception:
+        return series
+
+
 def apply_manifest(current_df: pd.DataFrame, manifest: Dict[str, Any], direction: str) -> Dict[str, Any]:
     """direction: 'forward' (replay before->after, i.e. Reapply) or
     'reverse' (replay after->before, i.e. Undo).
@@ -244,6 +281,15 @@ def apply_manifest(current_df: pd.DataFrame, manifest: Dict[str, Any], direction
     added_rows      = manifest.get("added_rows", [])
     dropped_columns = manifest.get("dropped_columns", [])
     added_columns   = manifest.get("added_columns", [])
+    dtype_changes   = manifest.get("dtype_changes", [])
+
+    dtype_key = "after" if direction == "forward" else "before"
+    for item in dtype_changes:
+        col = item.get("col")
+        if col not in df.columns:
+            conflicts.append(f"dtype change on missing column '{col}' skipped (column no longer exists)")
+            continue
+        df[col] = _cast_column_dtype(df[col], item.get(dtype_key))
 
     # --- changed cells: forward -> "after" value, reverse -> "before" value ---
     value_key = "after" if direction == "forward" else "before"
