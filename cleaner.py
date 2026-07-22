@@ -858,7 +858,7 @@ def fill_categorical(
     removes rows only when they are missing in the selected columns.
     """
     df = df.copy()
-    meta = {"strategy": strategy, "filled_cells": 0, "details": {}}
+    meta = {"strategy": strategy, "filled_cells": 0, "details": {}, "skipped": []}
 
     if columns:
         cat_cols = [c for c in columns if c in df.columns]
@@ -879,30 +879,44 @@ def fill_categorical(
         for c in cat_cols:
             missing_mask = df[c].isna()
             missing_before = missing_mask.sum()
+            missing_index = df.index[missing_mask].tolist()
+            if isinstance(df[c].dtype, pd.CategoricalDtype) and fill_val not in df[c].cat.categories:
+                df[c] = df[c].cat.add_categories([fill_val])
             df[c] = df[c].fillna(fill_val)
             meta["details"][c] = {
                 "method": "constant",
                 "filled": int(missing_before),
                 "value": str(fill_val),
-                "rows": [int(i) + 1 if isinstance(i, (int, np.integer)) else str(i) for i in df.index[missing_mask].tolist()]
+                "rows": [int(i) + 1 if isinstance(i, (int, np.integer)) else str(i) for i in missing_index],
+                "row_ids": [str(i) for i in missing_index],
             }
             meta["filled_cells"] += int(missing_before)
         return df, meta
 
     elif strategy == "mode":
         for c in cat_cols:
-            try:
-                mode_val = df[c].mode(dropna=True).iloc[0]
-            except Exception as exc:
-                raise ValueError(f"Mode is unavailable for all-null column {c!r}.") from exc
             missing_mask = df[c].isna()
             missing_before = missing_mask.sum()
+            missing_index = df.index[missing_mask].tolist()
+            modes = df[c].mode(dropna=True)
+            if modes.empty:
+                meta["skipped"].append({
+                    "column": c,
+                    "strategy": "mode",
+                    "missing": int(missing_before),
+                    "reason": "Mode is unavailable because the column has no non-missing values.",
+                    "rows": [int(i) + 1 if isinstance(i, (int, np.integer)) else str(i) for i in missing_index],
+                    "row_ids": [str(i) for i in missing_index],
+                })
+                continue
+            mode_val = modes.iloc[0]
             df[c] = df[c].fillna(mode_val)
             meta["details"][c] = {
                 "method": "mode",
                 "filled": int(missing_before),
                 "value": str(mode_val),
-                "rows": [int(i) + 1 if isinstance(i, (int, np.integer)) else str(i) for i in df.index[missing_mask].tolist()]
+                "rows": [int(i) + 1 if isinstance(i, (int, np.integer)) else str(i) for i in missing_index],
+                "row_ids": [str(i) for i in missing_index],
             }
             meta["filled_cells"] += int(missing_before)
         return df, meta
@@ -1261,11 +1275,13 @@ def clean_dataframe(
             working.loc[str_mask, c] = working.loc[str_mask, c].map(lambda v: v.strip())
             changed_mask = before.ne(working[c]) & before.notna()
             changed_rows = _row_numbers(working.index[changed_mask])
+            changed_row_ids = [str(idx) for idx in working.index[changed_mask]]
             if changed_rows:
                 changed_cols.append(c)
                 trim_details.append({
                     "column": c,
                     "rows": changed_rows,
+                    "row_ids": changed_row_ids,
                     "count": len(changed_rows),
                 })
         # Only report this as something that happened if it actually changed
@@ -1658,6 +1674,7 @@ def clean_dataframe(
 
             cat_total_filled = 0
             cat_details_merged: Dict[str, Any] = {}
+            cat_skipped_merged: List[Dict[str, Any]] = []
             cat_strategy_used = global_cat_strategy
 
             for strat, cols in strategy_groups.items():
@@ -1681,6 +1698,7 @@ def clean_dataframe(
                 )
                 cat_total_filled += cat_meta.get("filled_cells", 0)
                 cat_details_merged.update(cat_meta.get("details", {}))
+                cat_skipped_merged.extend(cat_meta.get("skipped", []))
                 cat_strategy_used = strat
 
             filled_cells += cat_total_filled
@@ -1690,6 +1708,8 @@ def clean_dataframe(
                 "column_strategies": categorical_col_strategies,
                 "filled_cells": cat_total_filled,
                 "details": cat_details_merged,
+                "skipped": cat_skipped_merged,
+                "reason": None if cat_total_filled > 0 or cat_details_merged else "No categorical missing cells could be filled with the selected option.",
             })
     else:
         report["operations"].append({"action": "skip_missing_values", "reason": "not selected for this preview"})

@@ -32,6 +32,7 @@ import math
 import tempfile
 import threading
 import warnings
+import time
 from io import StringIO
 from datetime import datetime, timezone
 
@@ -41,6 +42,7 @@ from flask import (
     g, has_request_context,
 )
 from werkzeug.utils import secure_filename
+from werkzeug.exceptions import HTTPException
 import pandas as pd
 import numpy as np
 
@@ -118,7 +120,16 @@ def csrf_token() -> str:
 
 
 def _wants_json_response() -> bool:
-    return request.path.startswith("/api/") or request.is_json or "application/json" in request.headers.get("Accept", "")
+    operation_paths = {
+        "/preview_clean", "/preview_custom_code", "/get_editor_data",
+        "/preview_outliers", "/apply_manifest", "/resume_replay",
+    }
+    return (
+        request.path.startswith("/api/")
+        or request.path in operation_paths
+        or request.is_json
+        or "application/json" in request.headers.get("Accept", "")
+    )
 
 
 def api_error(code: str, message: str, status: int = 400, user_action: str = "", retryable: bool = False, details: dict | None = None):
@@ -141,6 +152,66 @@ def api_error(code: str, message: str, status: int = 400, user_action: str = "",
     }
     logging.warning("api_error code=%s status=%s retryable=%s", code, status, retryable)
     return jsonify(payload), status
+
+
+def _operation_failure_explanation(exc: Exception, phase: str) -> tuple[str, str]:
+    """Translate common internal failures into useful, non-sensitive UI guidance."""
+    exc_name = type(exc).__name__.lower()
+    exc_text = str(exc).lower()
+    combined = f"{exc_name} {exc_text}"
+
+    if isinstance(exc, MemoryError) or "out of memory" in combined or "cannot allocate memory" in combined:
+        return (
+            "The dataset is too large for the memory currently available, so the action was stopped without changing it.",
+            "Close other memory-heavy programs, use fewer columns, or split the dataset and retry.",
+        )
+    if isinstance(exc, PermissionError) or "permission denied" in combined or "being used by another process" in combined:
+        return (
+            "Windows could not update the project snapshot because the file is locked or not writable. The dataset was left unchanged.",
+            "Close programs using the project files, confirm the folder is writable, and retry.",
+        )
+    if "categorical" in combined and ("new category" in combined or "setitem" in combined):
+        return (
+            "A selected fill value was not accepted by the column's category definition, so the action was not saved.",
+            "Refresh the project and retry. If it repeats, provide the diagnostic ID shown below.",
+        )
+    if "arrow" in combined or "feather" in combined or "serialis" in combined or "serializ" in combined:
+        return (
+            "The cleaned values could not be stored in the project snapshot because one column contains incompatible value types.",
+            "Review recent type conversions or cell edits, then retry and provide the diagnostic ID if it repeats.",
+        )
+    if any(token in combined for token in (
+        "mysql", "databaseerror", "operationalerror", "interfaceerror", "integrityerror",
+        "connectionerror", "db down", "connection refused", "connection reset",
+    )):
+        return (
+            "The cleaning result was calculated, but the project history database did not accept the save. The dataset was left unchanged.",
+            "Check the database connection and retry the action.",
+        )
+    if isinstance(exc, UnicodeError) or "parsererror" in combined or "decode" in combined:
+        return (
+            "The dataset contains text or file formatting that could not be read consistently for this action.",
+            "Check the file encoding and column formatting, then retry.",
+        )
+    if isinstance(exc, (TypeError, ValueError)):
+        return (
+            "One or more selected values are incompatible with the requested cleaning operation, so no changes were committed.",
+            "Review the selected columns, values, and data types, then retry.",
+        )
+    if isinstance(exc, OSError):
+        return (
+            "The project file could not be read or updated by Windows, so the dataset was left unchanged.",
+            "Check available disk space and folder access, then retry.",
+        )
+    if phase == "save":
+        return (
+            "The cleaning result was calculated, but its Change Log entry and project snapshot could not be saved together. The dataset was left unchanged.",
+            "Retry once. If it repeats, provide the diagnostic ID shown below.",
+        )
+    return (
+        "The cleaning operation stopped before any changes were committed because an unexpected processing error occurred.",
+        "Retry once. If it repeats, provide the diagnostic ID shown below.",
+    )
 
 
 def _submitted_dataset_version(values) -> int:
@@ -209,6 +280,22 @@ def _file_too_large(_e):
         )
     flash("That file is too large. Max upload size is 100 MB.")
     return redirect(request.referrer or url_for('index')), 413
+
+
+@app.errorhandler(Exception)
+def _unhandled_request_error(exc):
+    """Last-resort boundary: keep API failures structured and traceable."""
+    if isinstance(exc, HTTPException):
+        return exc
+    logging.exception("Unhandled request failure")
+    message, user_action = _operation_failure_explanation(exc, "process")
+    if _wants_json_response():
+        return api_error(
+            "UNEXPECTED_REQUEST_FAILURE", message, status=500,
+            user_action=user_action, retryable=True,
+        )
+    flash(f"{message} {user_action}")
+    return redirect(request.referrer or url_for("index")), 500
 
 def _persistent_dir() -> str:
     """Directory for files that must survive between runs (.secret_key, .env).
@@ -358,6 +445,19 @@ def get_cached_dq(sid: str, file_path: str, df):
     return score
 
 
+def get_cached_dq_if_available(sid: str, file_path: str):
+    """Return the immutable-source DQ score only if it is already cached."""
+    try:
+        mtime = os.path.getmtime(file_path)
+    except FileNotFoundError:
+        return None
+    with _cache_lock:
+        cached = _dq_cache.get(sid)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    return None
+
+
 # --- Cleaned-dataset DQ score cache ------------------------------------------
 # data_quality_score() isn't a cheap lookup like get_cached_dq above — it runs
 # several regex/string passes per column (placeholder detection, numeric-like
@@ -382,6 +482,93 @@ _analysis_cache: dict = {}
 _ANALYSIS_CACHE_MAX = 10
 _operation_cache: dict = {}
 _operation_cache_lock = threading.Lock()
+
+
+def _ui_analysis(df: pd.DataFrame) -> dict:
+    """Exact live-panel analysis without the duplicate 100-row preview payload."""
+    rows, cols = df.shape
+    total_cells = rows * cols if cols > 0 else 1
+    missing_by_column = []
+    missing_count = 0
+    for c in df.columns:
+        col_missing = int(df[c].isna().sum())
+        missing_count += col_missing
+        if col_missing > 0:
+            missing_by_column.append({
+                "column": c,
+                "missing": col_missing,
+                "percent": round((col_missing / rows) * 100, 2) if rows else 0,
+            })
+
+    def display_value(value):
+        try:
+            if pd.isna(value):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        if isinstance(value, float) and not np.isfinite(value):
+            return str(value)
+        return value
+
+    missing_rows = []
+    missing_rows_total = 0
+    missing_editor_limit = min(len(df), 2000)
+    if missing_count > 0:
+        missing_mask = df.isna().any(axis=1)
+        missing_rows_total = int(missing_mask.sum())
+        missing_df = df.loc[missing_mask]
+        for position, idx in enumerate(missing_df.index, start=1):
+            if len(missing_rows) >= missing_editor_limit:
+                break
+            row = missing_df.loc[idx]
+            row_position = int(df.index.get_loc(idx)) if idx in df.index else position - 1
+            missing_rows.append({
+                "row_index": int(idx) if isinstance(idx, (int, np.integer)) else str(idx),
+                "row_number": row_position + 1,
+                "data_row_number": row_position + 1,
+                "missing_columns": [c for c in df.columns if pd.isna(row[c])],
+                "row_data": {c: display_value(row[c]) for c in df.columns},
+            })
+
+    empty_columns = [c for c in df.columns if df[c].isna().all()]
+    unnamed_columns = []
+    for c in df.columns:
+        if str(c).strip().lower().startswith("unnamed"):
+            non_missing = int(df[c].notna().sum())
+            missing = int(df[c].isna().sum())
+            unnamed_columns.append({
+                "column": c,
+                "non_missing": non_missing,
+                "missing": missing,
+                "percent_missing": round((missing / rows) * 100, 2) if rows else 0,
+                "safe_to_drop": non_missing == 0,
+            })
+    constant_columns = [
+        c for c in df.columns
+        if df[c].notna().any() and df[c].nunique(dropna=True) <= 1
+    ]
+    whitespace_cells = 0
+    for c in df.select_dtypes(include=["object"]).columns:
+        whitespace_cells += int(df[c].map(
+            lambda value: isinstance(value, str) and value != value.strip()
+        ).sum())
+
+    return {
+        "shape": [rows, cols],
+        "missing_count": missing_count,
+        "missing_percent": round(0 if total_cells == 0 else (missing_count / total_cells) * 100, 2),
+        "duplicate_count": int(df.duplicated().sum()) if rows else 0,
+        "empty_columns": empty_columns,
+        "unnamed_columns": unnamed_columns,
+        "constant_columns": constant_columns,
+        "whitespace_cells": whitespace_cells,
+        "dtypes": {c: str(df[c].dtype) for c in df.columns},
+        "numeric_columns": df.select_dtypes(include=[np.number]).columns.tolist(),
+        "missing_by_column": missing_by_column,
+        "missing_rows": missing_rows,
+        "missing_rows_display_limit": missing_editor_limit,
+        "missing_rows_total": missing_rows_total,
+    }
 
 
 def get_cached_analysis(sid: str, df: pd.DataFrame, fp=None) -> dict:
@@ -409,10 +596,7 @@ def get_cached_analysis(sid: str, df: pd.DataFrame, fp=None) -> dict:
             cached = _analysis_cache.get(sid)
         if cached and cached[0] == fp:
             return cached[1]
-    analysis = {
-        "dtypes": {c: str(df[c].dtype) for c in df.columns},
-        "numeric_columns": df.select_dtypes(include=[np.number]).columns.tolist(),
-    }
+    analysis = _ui_analysis(df)
     if fp is not None:
         with _cache_lock:
             if len(_analysis_cache) >= _ANALYSIS_CACHE_MAX and sid not in _analysis_cache:
@@ -636,6 +820,75 @@ def _op_label(op: dict, fallback: str) -> str:
     return fallback
 
 
+def _operation_notices(operations: list[dict] | None) -> list[str]:
+    """Return concise explanations for requested work that was skipped."""
+    notices = []
+    for op in operations or []:
+        if not isinstance(op, dict):
+            continue
+        action = str(op.get("action") or "")
+        if action in ("fill_numeric", "fill_categorical"):
+            for item in op.get("skipped") or []:
+                if not isinstance(item, dict):
+                    continue
+                column = str(item.get("column") or "Selected column")
+                reason = str(item.get("reason") or "The selected strategy was not applicable.")
+                notices.append(f"{column}: {reason}")
+        elif action == "manual_convert_dtypes_failed":
+            reason = op.get("error") or "the selected conversion was not compatible with the column values"
+            notices.append(f"Data type conversion was not applied: {reason}.")
+        elif action == "manual_convert_dtypes":
+            for column, detail in (op.get("changes") or {}).items():
+                if isinstance(detail, dict) and detail.get("success") is False:
+                    reason = detail.get("note") or "the selected conversion was not compatible with the column values"
+                    notices.append(f"{column}: {reason}.")
+    return list(dict.fromkeys(notices))
+
+
+def _no_op_message(operations: list[dict] | None, action_name: str = "") -> str:
+    """Explain a harmless no-change result in terms of the selected operation."""
+    notices = _operation_notices(operations)
+    if notices:
+        return "No changes were applied. " + " ".join(notices)
+
+    actions = {str(op.get("action") or "") for op in operations or [] if isinstance(op, dict)}
+    label = str(action_name or "").lower()
+    if "drop_duplicates" in actions or "duplicate" in label:
+        return "No duplicate rows were found, so the dataset was already clean for this action."
+    if "trim_whitespace" in actions or "whitespace" in label:
+        return "No leading or trailing whitespace was found."
+    if "drop_empty_columns" in actions or "empty column" in label:
+        return "No fully empty columns were found."
+    if "drop_constant_columns" in actions or "constant column" in label:
+        return "No constant columns were found."
+    if actions.intersection({"fill_numeric", "fill_categorical", "drop_missing_rows"}) or "missing" in label:
+        return "No missing cells matched the selected strategy."
+    if actions.intersection({"convert_dtypes", "manual_convert_dtypes", "manual_convert_dtypes_failed"}) or "type" in label:
+        return "The selected columns already use those data types, so no conversion was needed."
+    if actions.intersection({"manual_outlier_removal", "outlier_removal", "outlier_clip"}) or "outlier" in label:
+        return "No rows matched the selected outlier action."
+    if "drop_selected_columns" in actions or "selected column" in label:
+        return "No selected columns needed to be removed."
+    return "No changes were needed; the dataset already satisfies this action."
+
+
+def _apply_result_message(history_actions: list[dict], notices: list[str] | None = None) -> str:
+    labels = [
+        str((item.get("action_config") or {}).get("label") or item.get("action_name") or "").strip()
+        for item in history_actions or []
+    ]
+    labels = [label for label in labels if label]
+    if not labels:
+        message = "Applied successfully."
+    elif len(labels) == 1:
+        message = labels[0] + "."
+    else:
+        message = f"Applied {len(labels)} actions: " + "; ".join(labels) + "."
+    if notices:
+        message += " Skipped: " + " ".join(notices)
+    return message
+
+
 def _history_pairs_for_operation(op: dict) -> list[dict]:
     op = op or {}
     action = str(op.get("action", ""))
@@ -816,7 +1069,35 @@ def _sequential_history_actions(before_df: pd.DataFrame, final_df: pd.DataFrame,
     """Split a combined Apply into independently replayable operation actions."""
     cursor = before_df.copy(deep=True)
     actions = []
-    candidates = [op for op in operations if isinstance(op, dict) and op.get("action")]
+    non_history_actions = {"replace_placeholders", "rename_columns", "skip_missing_values"}
+    candidates = [
+        op for op in operations
+        if isinstance(op, dict) and op.get("action") and op.get("action") not in non_history_actions
+    ]
+    if len(candidates) == 1:
+        op = candidates[0]
+        local_manifest = _manifest_for_operation(manifest, op, 1)
+        if snapshot_diff.manifest_is_empty(local_manifest):
+            return []
+        local_manifest["row_evidence"] = _full_row_evidence(before_df, final_df, local_manifest)
+        config = {
+            "label": _op_label(op, action_name),
+            "operations": [op],
+            "activePanelId": action_scope,
+            "server_authoritative": True,
+            "preview": _manifest_action_preview(before_df, final_df, local_manifest),
+        }
+        if applied_at_ms:
+            config["applied_at_ms"] = applied_at_ms
+        return [{
+            "action_name": str(op.get("action"))[:128],
+            "action_config": config,
+            "rows_before": int(before_df.shape[0]),
+            "rows_after": int(final_df.shape[0]),
+            "cells_changed": _operation_cells_changed([op], local_manifest),
+            "dq_after": dq_after,
+            "manifest": local_manifest,
+        }]
     for op in candidates:
         local_manifest = _manifest_for_operation(manifest, op, len(candidates))
         if snapshot_diff.manifest_is_empty(local_manifest):
@@ -1060,6 +1341,19 @@ def _current_snapshot_path(sid: str) -> str:
     return os.path.join(UPLOAD_FOLDER, sid, "_current_snapshot.feather")
 
 
+def _replace_snapshot_file(tmp_path: str, final_path: str) -> None:
+    """Replace the current snapshot, tolerating short Windows file locks."""
+    last_error = None
+    for attempt in range(6):
+        try:
+            os.replace(tmp_path, final_path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(0.08 * (attempt + 1))
+    os.replace(tmp_path, final_path)
+
+
 def save_current_snapshot(sid: str, df: pd.DataFrame) -> None:
     """Persist the authoritative current dataset snapshot for a session."""
     # Feather can't round-trip an arbitrary pandas Index directly (and
@@ -1104,7 +1398,7 @@ def save_current_snapshot(sid: str, df: pd.DataFrame) -> None:
         # for the next resume/undo to trip over.
         tmp_path = path + ".tmp"
         feather.write_feather(to_write, tmp_path)
-        os.replace(tmp_path, path)
+        _replace_snapshot_file(tmp_path, path)
 
 
 def prepare_current_snapshot_temp(sid: str, df: pd.DataFrame) -> tuple[str, str]:
@@ -1143,7 +1437,7 @@ def prepare_current_snapshot_temp(sid: str, df: pd.DataFrame) -> tuple[str, str]
 
 def promote_current_snapshot_temp(tmp_path: str, final_path: str) -> None:
     """Atomically promote a prepared snapshot after history persistence succeeds."""
-    os.replace(tmp_path, final_path)
+    _replace_snapshot_file(tmp_path, final_path)
 
 
 def load_current_snapshot(sid: str):
@@ -1344,6 +1638,109 @@ def compute_changed_rows(original_df, cleaned_df):
     return df_to_rows_safe(show_df), row_numbers_for(show_df), removed, added_nums
 
 
+def _display_row_number_for_label(label):
+    try:
+        return int(label) + 1
+    except (TypeError, ValueError):
+        return str(label)
+
+
+def _row_labels_from_operation_evidence(operations: list[dict] | None) -> tuple[set[str], set[str], bool]:
+    """Return changed and removed row labels from recorded operation evidence.
+
+    The final bool is True only when the operation evidence was sufficient and
+    a full dataframe comparison can be skipped safely.
+    """
+    changed: set[str] = set()
+    removed: set[str] = set()
+    unsupported = False
+    for op in operations or []:
+        action = str(op.get("action") or "")
+        if action in ("skip_missing_values",):
+            continue
+        if action in ("drop_empty_columns", "drop_constant_columns", "drop_selected_columns", "convert_dtypes", "manual_convert_dtypes"):
+            continue
+        if action in ("manual_cell_updates", "manual_missing_cell_updates"):
+            for update in op.get("updates") or []:
+                if update.get("row_index") is not None:
+                    changed.add(str(update.get("row_index")))
+            continue
+        if action == "replace_placeholders":
+            for item in op.get("replacements") or []:
+                if item.get("row_index") is not None:
+                    changed.add(str(item.get("row_index")))
+            continue
+        if action == "trim_whitespace":
+            for item in op.get("details") or []:
+                changed.update(str(row_id) for row_id in (item.get("row_ids") or []))
+            continue
+        if action == "fill_numeric":
+            for item in op.get("details") or []:
+                if item.get("strategy") == "drop":
+                    removed.update(str(row_id) for row_id in (item.get("row_ids") or []))
+                else:
+                    changed.update(str(row_id) for row_id in (item.get("row_ids") or []))
+            continue
+        if action == "fill_categorical":
+            for item in (op.get("details") or {}).values():
+                if not isinstance(item, dict):
+                    continue
+                if item.get("strategy") == "drop" or item.get("method") == "drop":
+                    removed.update(str(row_id) for row_id in (item.get("row_ids") or []))
+                else:
+                    changed.update(str(row_id) for row_id in (item.get("row_ids") or []))
+            continue
+        if action in ("manual_outlier_removal", "outlier_removal"):
+            removed.update(str(row_id) for row_id in (op.get("valid_indices_dropped") or op.get("selected_rows") or []))
+            continue
+        if action == "drop_duplicates":
+            for item in op.get("duplicate_matches") or []:
+                if item.get("removed_row_id") is not None:
+                    removed.add(str(item.get("removed_row_id")))
+            continue
+        if action == "drop_missing_rows":
+            unsupported = True
+            continue
+        if action in ("outlier_clip",):
+            for item in op.get("changes") or []:
+                if item.get("row_id") is not None:
+                    changed.add(str(item.get("row_id")))
+            continue
+        unsupported = True
+    return changed, removed, not unsupported
+
+
+def _changed_rows_from_evidence(raw_df: pd.DataFrame, cleaned_df: pd.DataFrame,
+                                operations: list[dict] | None, manifest: dict | None = None):
+    changed_labels: set[str] = set()
+    removed_labels: set[str] = set()
+    supported = True
+    if manifest:
+        changed_labels.update(str(item.get("row")) for item in manifest.get("changed_cells", []) if item.get("row") is not None)
+        changed_labels.update(str(item.get("row")) for item in manifest.get("added_rows", []) if item.get("row") is not None)
+        removed_labels.update(str(item.get("row")) for item in manifest.get("dropped_rows", []) if item.get("row") is not None)
+    else:
+        changed_labels, removed_labels, supported = _row_labels_from_operation_evidence(operations)
+    if not supported:
+        return None
+
+    changed_index = []
+    for label in changed_labels:
+        row = _restore_index_dtype_for_lookup(label, cleaned_df.index)
+        if row in cleaned_df.index:
+            changed_index.append(row)
+    changed_index = list(dict.fromkeys(changed_index))
+    show_index = changed_index[:200]
+    changed_recs = df_to_rows_safe(cleaned_df.loc[show_index]) if show_index else []
+    changed_rnums = [_display_row_number_for_label(label) for label in list(changed_labels)[:200]]
+    removed_rnums = [_display_row_number_for_label(label) for label in list(removed_labels)]
+    added_rnums = [
+        _display_row_number_for_label(idx)
+        for idx in cleaned_df.index.difference(raw_df.index).tolist()
+    ]
+    return changed_recs, changed_rnums, removed_rnums, added_rnums, len(changed_labels)
+
+
 def build_manifest_patch(manifest: dict, direction: str) -> dict:
     """Turn a manifest directly into a frontend patch — no dataframe access
     at all. The manifest already carries the before/after value for every
@@ -1373,6 +1770,330 @@ def build_manifest_patch(manifest: dict, direction: str) -> dict:
         "removed_columns": removed_columns,
         "added_columns":   added_columns,
     }
+
+
+def _manual_update_manifest(before_df: pd.DataFrame, after_df: pd.DataFrame, operations: list | None) -> dict | None:
+    """Build an exact manifest for manual cell edits without scanning the whole DataFrame."""
+    allowed_actions = {"manual_cell_updates", "manual_missing_cell_updates"}
+    ignored_actions = {"skip_missing_values"}
+    manual_ops = []
+    for op in operations or []:
+        action = str(op.get("action") or "")
+        if action in allowed_actions:
+            manual_ops.append(op)
+        elif action not in ignored_actions:
+            return None
+    if not manual_ops:
+        return None
+
+    manifest = {
+        "changed_cells": [],
+        "dropped_rows": [],
+        "added_rows": [],
+        "dropped_columns": [],
+        "added_columns": [],
+        "dtype_changes": [],
+        "truncated": False,
+    }
+    seen = set()
+    for op in manual_ops:
+        for update in op.get("updates") or []:
+            row = update.get("row_index")
+            col = update.get("column")
+            if col not in before_df.columns or col not in after_df.columns:
+                return None
+            row_label = _restore_index_dtype_for_lookup(row, before_df.index)
+            if row_label not in before_df.index or row_label not in after_df.index:
+                return None
+            key = (str(row_label), str(col))
+            if key in seen:
+                continue
+            before_value = before_df.at[row_label, col]
+            after_value = after_df.at[row_label, col]
+            try:
+                before_missing = bool(pd.isna(before_value))
+                after_missing = bool(pd.isna(after_value))
+                if before_missing and after_missing:
+                    same_value = True
+                elif before_missing != after_missing:
+                    same_value = False
+                else:
+                    same_value = bool(before_value == after_value)
+            except (TypeError, ValueError):
+                same_value = False
+            if same_value:
+                continue
+            manifest["changed_cells"].append({
+                "row": str(row_label),
+                "col": str(col),
+                "before": make_json_safe(before_value),
+                "after": make_json_safe(after_value),
+            })
+            seen.add(key)
+
+    for col in before_df.columns.intersection(after_df.columns):
+        before_dtype = str(before_df[col].dtype)
+        after_dtype = str(after_df[col].dtype)
+        if before_dtype != after_dtype:
+            manifest["dtype_changes"].append({
+                "col": str(col),
+                "before": before_dtype,
+                "after": after_dtype,
+            })
+    return manifest
+
+
+def _operation_manifest(before_df: pd.DataFrame, after_df: pd.DataFrame, operations: list | None) -> dict | None:
+    """Build an exact per-action manifest from operation metadata.
+
+    This avoids the expensive all-cells diff for common actions where the
+    cleaner already reports the affected rows/columns. Unsupported operations
+    return None so callers fall back to snapshot_diff.compute_full_diff.
+    """
+    ignored_actions = {"skip_missing_values"}
+    supported_actions = {
+        "manual_cell_updates", "manual_missing_cell_updates",
+        "drop_selected_columns", "drop_empty_columns", "drop_constant_columns",
+        "drop_duplicates", "manual_outlier_removal", "outlier_removal",
+        "fill_numeric", "fill_categorical", "trim_whitespace",
+        "manual_convert_dtypes", "convert_dtypes",
+    }
+    ops = operations or []
+    if not ops:
+        return None
+    for op in ops:
+        action = str(op.get("action") or "")
+        if action not in supported_actions and action not in ignored_actions:
+            return None
+
+    manifest = {
+        "changed_cells": [],
+        "dropped_rows": [],
+        "added_rows": [],
+        "dropped_columns": [],
+        "added_columns": [],
+        "dtype_changes": [],
+        "truncated": False,
+    }
+    seen_cells: set[tuple[str, str]] = set()
+    seen_rows: set[str] = set()
+    seen_cols: set[str] = set()
+
+    def value_changed(before_value, after_value) -> bool:
+        try:
+            before_missing = bool(pd.isna(before_value))
+            after_missing = bool(pd.isna(after_value))
+            if before_missing and after_missing:
+                return False
+            if before_missing != after_missing:
+                return True
+            return not bool(before_value == after_value)
+        except (TypeError, ValueError):
+            return True
+
+    def resolve_row(row_key, frame_index):
+        row = _restore_index_dtype_for_lookup(row_key, frame_index)
+        return row if row in frame_index else None
+
+    def add_changed_cell(row_key, col):
+        if col not in before_df.columns or col not in after_df.columns:
+            return False
+        before_row = resolve_row(row_key, before_df.index)
+        after_row = resolve_row(row_key, after_df.index)
+        if before_row is None or after_row is None:
+            return False
+        key = (str(before_row), str(col))
+        if key in seen_cells:
+            return True
+        before_value = before_df.at[before_row, col]
+        after_value = after_df.at[after_row, col]
+        if value_changed(before_value, after_value):
+            manifest["changed_cells"].append({
+                "row": str(before_row),
+                "col": str(col),
+                "before": make_json_safe(before_value),
+                "after": make_json_safe(after_value),
+            })
+        seen_cells.add(key)
+        return True
+
+    def add_dropped_row(row_key):
+        row = resolve_row(row_key, before_df.index)
+        if row is None:
+            return False
+        key = str(row)
+        if key in seen_rows:
+            return True
+        series = before_df.loc[row]
+        manifest["dropped_rows"].append({
+            "row": key,
+            "data": {str(c): make_json_safe(series[c]) for c in before_df.columns},
+        })
+        seen_rows.add(key)
+        return True
+
+    def add_dropped_column(col):
+        if col not in before_df.columns:
+            return False
+        if col in after_df.columns:
+            return True
+        key = str(col)
+        if key in seen_cols:
+            return True
+        series = before_df[col]
+        manifest["dropped_columns"].append({
+            "col": key,
+            "data": {str(idx): make_json_safe(series.loc[idx]) for idx in before_df.index},
+        })
+        seen_cols.add(key)
+        return True
+
+    def add_dtype_changes(columns, requested_by_col=None):
+        requested_by_col = requested_by_col or {}
+        for col in columns:
+            if col not in before_df.columns or col not in after_df.columns:
+                continue
+            before_dtype = str(before_df[col].dtype)
+            after_dtype = str(after_df[col].dtype)
+            if before_dtype != after_dtype and not any(item.get("col") == str(col) for item in manifest["dtype_changes"]):
+                entry = {
+                    "col": str(col),
+                    "before": before_dtype,
+                    "after": after_dtype,
+                }
+                requested = requested_by_col.get(str(col))
+                if requested:
+                    entry["requested"] = str(requested)
+                manifest["dtype_changes"].append(entry)
+
+    for op in ops:
+        action = str(op.get("action") or "")
+        if action in ignored_actions:
+            continue
+
+        if action in {"manual_cell_updates", "manual_missing_cell_updates"}:
+            for update in op.get("updates") or []:
+                if not add_changed_cell(update.get("row_index"), update.get("column")):
+                    return None
+
+        elif action in {"drop_selected_columns", "drop_empty_columns", "drop_constant_columns"}:
+            for col in op.get("columns_dropped") or []:
+                if not add_dropped_column(col):
+                    return None
+
+        elif action == "drop_duplicates":
+            row_ids = [
+                match.get("removed_row_id")
+                for match in (op.get("duplicate_matches") or [])
+                if match.get("removed_row_id") is not None
+            ]
+            if not row_ids and int(op.get("removed_rows") or 0):
+                return None
+            for row_id in row_ids:
+                if not add_dropped_row(row_id):
+                    return None
+
+        elif action in {"manual_outlier_removal", "outlier_removal"}:
+            row_ids = op.get("valid_indices_dropped") or op.get("selected_positions") or []
+            if not row_ids and int(op.get("rows_removed") or op.get("removed_rows") or 0):
+                return None
+            for row_id in row_ids:
+                if not add_dropped_row(row_id):
+                    return None
+
+        elif action == "fill_numeric":
+            for detail in op.get("details") or []:
+                col = detail.get("column")
+                row_ids = detail.get("row_ids") or []
+                if detail.get("strategy") == "drop":
+                    for row_id in row_ids:
+                        if not add_dropped_row(row_id):
+                            return None
+                else:
+                    for row_id in row_ids:
+                        if not add_changed_cell(row_id, col):
+                            return None
+
+        elif action == "fill_categorical":
+            details = op.get("details") or {}
+            iterable = details.items() if isinstance(details, dict) else []
+            for col, detail in iterable:
+                row_ids = detail.get("row_ids") or []
+                if detail.get("strategy") == "drop" or detail.get("method") == "drop":
+                    for row_id in row_ids:
+                        if not add_dropped_row(row_id):
+                            return None
+                else:
+                    for row_id in row_ids:
+                        if not add_changed_cell(row_id, col):
+                            return None
+
+        elif action == "trim_whitespace":
+            for detail in op.get("details") or []:
+                col = detail.get("column")
+                for row_id in detail.get("row_ids") or []:
+                    if not add_changed_cell(row_id, col):
+                        return None
+
+        elif action in {"manual_convert_dtypes", "convert_dtypes"}:
+            changes = op.get("changes") or {}
+            columns = list(changes.keys()) if isinstance(changes, dict) else [
+                item.get("column") for item in changes if item.get("column")
+            ]
+            requested_by_col = {}
+            if isinstance(changes, dict):
+                requested_by_col = {
+                    str(col): info.get("requested")
+                    for col, info in changes.items()
+                    if isinstance(info, dict) and info.get("requested")
+                }
+            else:
+                requested_by_col = {
+                    str(item.get("column")): item.get("requested")
+                    for item in changes
+                    if isinstance(item, dict) and item.get("column") and item.get("requested")
+                }
+            common_rows = before_df.index.intersection(after_df.index)
+            for col in columns:
+                if col not in before_df.columns or col not in after_df.columns:
+                    return None
+                before_col = before_df.loc[common_rows, col]
+                after_col = after_df.loc[common_rows, col]
+                before_na = before_col.isna()
+                after_na = after_col.isna()
+                # Dtype replay alone is sufficient only when values compare
+                # equal (for example 1.0 -> 1). Lossy conversions such as
+                # 137.5 -> 138, text-to-number conversions, and coercions to
+                # missing must retain their exact before/after cell values.
+                # Those entries also drive the live Dataset Editor patch and
+                # let Undo restore the original decimals/text precisely.
+                only_one_na = before_na ^ after_na
+                different_present = pd.Series(False, index=common_rows, dtype=bool)
+                both_present = ~before_na & ~after_na
+                if bool(both_present.any()):
+                    present_rows = common_rows[both_present.to_numpy()]
+                    left = before_col.loc[present_rows].astype(object)
+                    right = after_col.loc[present_rows].astype(object)
+                    different_present.loc[present_rows] = left.ne(right).fillna(False).to_numpy(dtype=bool)
+                diff_mask = (only_one_na | different_present).astype(bool)
+                for row_id in common_rows[diff_mask.to_numpy()]:
+                    if not add_changed_cell(row_id, col):
+                        return None
+            add_dtype_changes(columns, requested_by_col)
+
+    actual_dropped_rows = {str(idx) for idx in before_df.index.difference(after_df.index)}
+    actual_added_rows = {str(idx) for idx in after_df.index.difference(before_df.index)}
+    actual_dropped_cols = {str(col) for col in before_df.columns.difference(after_df.columns)}
+    actual_added_cols = {str(col) for col in after_df.columns.difference(before_df.columns)}
+    manifest_dropped_rows = {str(item.get("row")) for item in manifest["dropped_rows"]}
+    manifest_dropped_cols = {str(item.get("col")) for item in manifest["dropped_columns"]}
+    if actual_added_rows or actual_added_cols:
+        return None
+    if manifest_dropped_rows != actual_dropped_rows or manifest_dropped_cols != actual_dropped_cols:
+        return None
+
+    add_dtype_changes(before_df.columns.intersection(after_df.columns))
+    return manifest
 
 
 def compute_added_removed_rows(raw_df: pd.DataFrame, new_df: pd.DataFrame):
@@ -1976,7 +2697,8 @@ def upload():
         file.save(file_path)
     except Exception as e:
         logging.exception("save upload failed")
-        flash(f"Failed to save uploaded file: {e}")
+        message, user_action = _operation_failure_explanation(e, "save")
+        flash(f"{message} {user_action}")
         return redirect(url_for("index"))
 
     try:
@@ -1985,7 +2707,7 @@ def upload():
             _df_cache[session_id] = (os.path.getmtime(file_path), df)  # seed cache
     except Exception as e:
         logging.exception("load_dataset failed")
-        flash(f"Failed to read uploaded file: {e}")
+        flash(str(e) if isinstance(e, ValueError) else "The uploaded dataset could not be read. Check its file type, encoding, and structure.")
         return redirect(url_for("index"))
 
     # Create DB project row; non-fatal if MySQL is down
@@ -2005,9 +2727,11 @@ def upload():
         flask_session["project_id"] = None
 
     try:
-        analysis = analyze_dataframe(df)
+        analysis = get_cached_analysis(session_id, df, fp=_df_fingerprint(df))
         ORIGINAL_PREVIEW_ROWS = 100
-        analysis["original_preview"]       = df_to_rows_safe(df, ORIGINAL_PREVIEW_ROWS)
+        original_preview = df_to_rows_safe(df, ORIGINAL_PREVIEW_ROWS)
+        analysis["preview"]                = original_preview
+        analysis["original_preview"]       = original_preview
         analysis["original_total_rows"]    = len(df)
         analysis["original_preview_count"] = min(len(df), ORIGINAL_PREVIEW_ROWS)
         analysis["row_index_map"] = {
@@ -2019,7 +2743,8 @@ def upload():
         analysis["project_id"]       = flask_session.get("project_id")  # for nav link
     except Exception as e:
         logging.exception("analyze_dataframe failed")
-        flash(f"Failed to analyze dataset: {e}")
+        message, user_action = _operation_failure_explanation(e, "process")
+        flash(f"{message} {user_action}")
         return redirect(url_for("index"))
 
     return render_template("index.html", uploaded_filename=filename,
@@ -2052,7 +2777,8 @@ def clean():
         df = get_cached_df(sid, file_path)
     except Exception as e:
         logging.exception("get_cached_df failed")
-        flash(f"Failed to read dataset: {e}")
+        message, user_action = _operation_failure_explanation(e, "process")
+        flash(f"The dataset could not be prepared for export: {message} {user_action}")
         return redirect(url_for("index"))
 
     dq_before = get_cached_dq(sid, file_path, df)
@@ -2173,7 +2899,8 @@ def clean():
                 os.remove(tmp_path)
         except Exception:
             pass
-        flash(f"Failed to save cleaned file: {e}")
+        message, user_action = _operation_failure_explanation(e, "save")
+        flash(f"{message} {user_action}")
         return redirect(url_for("index"))
 
     report_basename  = f"report_{secure_filename(filename.rsplit('.', 1)[0])}_v{next_version:04d}_{timestamp}.json"
@@ -2196,7 +2923,8 @@ def clean():
                     os.remove(path)
             except Exception:
                 logging.exception("Could not remove incomplete final output")
-        flash(f"Failed to save report: {e}")
+        message, user_action = _operation_failure_explanation(e, "save")
+        flash(f"{message} {user_action}")
         return redirect(url_for("index"))
 
     # Log cleaning run to DB — non-fatal (file already saved before this block)
@@ -2236,7 +2964,12 @@ def clean():
 # --- Preview clean (live) ----------------------------------------------------
 
 def build_clean_payload(raw_df: pd.DataFrame, cleaned_df: pd.DataFrame, report: dict,
-                        sid: str = None, file_path: str = None) -> dict:
+                        sid: str = None, file_path: str = None,
+                        include_editor_data: bool = True,
+                        include_row_index_map: bool = True,
+                        manifest: dict | None = None,
+                        include_quality: bool = True,
+                        include_changed_rows: bool = True) -> dict:
     """Shared response-shape builder for /preview_clean and /apply_manifest.
 
     Given a raw/cleaned DataFrame pair and a report dict that already has its
@@ -2248,13 +2981,28 @@ def build_clean_payload(raw_df: pd.DataFrame, cleaned_df: pd.DataFrame, report: 
     identical JSON shapes and the same frontend render functions work for
     both an actual Apply and an Undo/Reapply-via-manifest.
     """
-    dq_before = get_cached_dq(sid, file_path, raw_df) if (sid and file_path) else data_quality_score(raw_df)
-    quality_breakdown = data_quality_breakdown(cleaned_df, raw_df)
-    dq_after  = float(quality_breakdown["score"])
+    cleaned_fp = _df_fingerprint(cleaned_df) if sid else None
+    if include_quality:
+        dq_before = get_cached_dq(sid, file_path, raw_df) if (sid and file_path) else data_quality_score(raw_df)
+    else:
+        dq_before = get_cached_dq_if_available(sid, file_path) if (sid and file_path) else None
+    if include_quality:
+        quality_breakdown = data_quality_breakdown(cleaned_df, raw_df)
+        dq_after = float(quality_breakdown["score"])
+        quality_delta = round(dq_after - dq_before, 2)
+    else:
+        quality_breakdown = None
+        dq_after = dq_before
+        quality_delta = 0.0 if dq_before is not None else None
     report["data_quality_before"]         = dq_before
     report["data_quality_after"]          = dq_after
-    report["dq_improvement"]              = round(dq_after - dq_before, 2)
-    report["quality_breakdown"]           = quality_breakdown
+    report["dq_improvement"]              = quality_delta
+    if quality_breakdown is not None:
+        report["quality_breakdown"]       = quality_breakdown
+    else:
+        report.pop("quality_breakdown", None)
+        report["quality_pending"]         = True
+        report["quality_note"]            = "Full quality score recalculates outside this fast response."
     report["cleaning_completeness_score"] = cleaning_completeness_score(report)
 
     preview_rows = min(len(cleaned_df), 100)
@@ -2272,10 +3020,12 @@ def build_clean_payload(raw_df: pd.DataFrame, cleaned_df: pd.DataFrame, report: 
     report["preview_display_limit"] = preview_rows
     report["cleaned_columns"]       = list(cleaned_df.columns)
 
-    row_index_map = {
-        str(i): int(idx) if isinstance(idx, (int, np.integer)) else str(idx)
-        for i, idx in enumerate(cleaned_df.index)
-    }
+    row_index_map = None
+    if include_row_index_map:
+        row_index_map = {
+            str(i): int(idx) if isinstance(idx, (int, np.integer)) else str(idx)
+            for i, idx in enumerate(cleaned_df.index)
+        }
 
     missing_by_column_remaining = []
     for col, count in cleaned_df.isna().sum().items():
@@ -2287,26 +3037,32 @@ def build_clean_payload(raw_df: pd.DataFrame, cleaned_df: pd.DataFrame, report: 
                 "percent": round((count / len(cleaned_df)) * 100, 2) if len(cleaned_df) else 0,
             })
 
-    changed_recs, changed_rnums, removed_rnums, added_rnums = compute_changed_rows(raw_df, cleaned_df)
+    if include_changed_rows:
+        evidence_rows = _changed_rows_from_evidence(raw_df, cleaned_df, report.get("operations"), manifest)
+        if evidence_rows is None:
+            changed_recs, changed_rnums, removed_rnums, added_rnums = compute_changed_rows(raw_df, cleaned_df)
+            total_changed_rows = len(changed_recs)
+        else:
+            changed_recs, changed_rnums, removed_rnums, added_rnums, total_changed_rows = evidence_rows
+    else:
+        changed_recs, changed_rnums, removed_rnums, added_rnums, total_changed_rows = [], [], [], [], 0
     report["changed_rows_preview"] = changed_recs
     report["changed_row_numbers"]  = changed_rnums
     report["removed_row_numbers"]  = removed_rnums
     report["added_row_numbers"]    = added_rnums
-    report["total_changed_rows"]   = len(changed_recs)
-    report["has_changes"]          = len(changed_recs) > 0 or len(removed_rnums) > 0
+    report["total_changed_rows"]   = total_changed_rows
+    report["has_changes"]          = total_changed_rows > 0 or len(removed_rnums) > 0
 
-    editor_data = df_to_rows_safe(cleaned_df)
+    editor_data = df_to_rows_safe(cleaned_df) if include_editor_data else None
 
-    cleaned_analysis = analyze_dataframe(cleaned_df)
+    cleaned_analysis = get_cached_analysis(sid, cleaned_df, fp=cleaned_fp) if sid else analyze_dataframe(cleaned_df)
     cleaned_analysis.pop("preview", None)  # duplicates report["preview"] above
 
-    return {
+    payload = {
         "success":        True,
         "preview":        report.get("preview", []),
         "changed_preview": changed_recs,
-        "editor_data":    editor_data,
         "editor_columns": list(cleaned_df.columns),
-        "row_index_map":  row_index_map,
         "report":         report,
         "analysis":       cleaned_analysis,
         "summary": {
@@ -2319,15 +3075,21 @@ def build_clean_payload(raw_df: pd.DataFrame, cleaned_df: pd.DataFrame, report: 
             "empty_columns_removed": int(report["empty_columns_removed"]),
             "quality_before":        dq_before,
             "quality_after":         dq_after,
-            "quality_delta":         round(dq_after - dq_before, 2),
+            "quality_delta":         quality_delta,
+            "quality_pending":       not include_quality,
             "cleaning_completeness": report["cleaning_completeness_score"],
             "missing_remaining":     int(cleaned_df.isna().sum().sum()),
             "missing_rows_remaining":int(cleaned_df.isna().any(axis=1).sum()),
             "missing_by_column_remaining": missing_by_column_remaining,
-            "changed_rows":  len(changed_recs),
+            "changed_rows":  total_changed_rows,
             "removed_rows":  len(removed_rnums),
         }
     }
+    if include_editor_data:
+        payload["editor_data"] = editor_data
+    if include_row_index_map:
+        payload["row_index_map"] = row_index_map
+    return payload
 
 
 def _operation_cells_changed(operations: list[dict] | None, manifest: dict | None) -> int:
@@ -2346,15 +3108,30 @@ def _operation_cells_changed(operations: list[dict] | None, manifest: dict | Non
     return total
 
 
-def _full_row_evidence(before_df: pd.DataFrame, after_df: pd.DataFrame, manifest: dict | None) -> list[dict]:
+def _full_row_evidence(before_df: pd.DataFrame, after_df: pd.DataFrame,
+                       manifest: dict | None, limit: int = 500) -> list[dict]:
     """Capture complete immediate Before/After rows for every affected row."""
     manifest = manifest or {}
 
+    def frame_uses_uploaded_row_numbers(frame):
+        if not len(frame.index):
+            return False
+        if not pd.api.types.is_integer_dtype(frame.index.dtype):
+            return False
+        return int(frame.index.min()) == 0 and int(frame.index.max()) >= len(frame.index) - 1
+
+    before_uploaded_rows = frame_uses_uploaded_row_numbers(before_df)
+    after_uploaded_rows = frame_uses_uploaded_row_numbers(after_df)
+
     def display_row_number(row_id):
         try:
-            return int(row_id) + 1
+            numeric_id = int(row_id)
         except (TypeError, ValueError):
             return str(row_id)
+        for frame, uses_uploaded_rows in ((before_df, before_uploaded_rows), (after_df, after_uploaded_rows)):
+            if numeric_id in frame.index:
+                return numeric_id + 1 if uses_uploaded_rows else str(row_id)
+        return numeric_id + 1
 
     affected = []
     for item in manifest.get("changed_cells", []) or []:
@@ -2362,9 +3139,8 @@ def _full_row_evidence(before_df: pd.DataFrame, after_df: pd.DataFrame, manifest
     for key in ("dropped_rows", "added_rows"):
         for item in manifest.get(key, []) or []:
             affected.append(item.get("row"))
-    row_ids = list(dict.fromkeys(row_id for row_id in affected if row_id is not None))
-    if not row_ids and ((manifest.get("dropped_columns") or []) or (manifest.get("added_columns") or [])):
-        row_ids = list(dict.fromkeys([*before_df.index.tolist(), *after_df.index.tolist()]))
+    all_row_ids = list(dict.fromkeys(row_id for row_id in affected if row_id is not None))
+    row_ids = all_row_ids[:limit]
     columns = list(dict.fromkeys([*before_df.columns.tolist(), *after_df.columns.tolist()]))
     changed_by_row: dict[str, list[str]] = {}
     for item in manifest.get("changed_cells", []) or []:
@@ -2403,7 +3179,14 @@ def _full_row_evidence(before_df: pd.DataFrame, after_df: pd.DataFrame, manifest
             "changed_columns": list(dict.fromkeys(changed_columns)),
             "status": "removed" if after is None else ("added" if before is None else "changed"),
         })
-    return make_json_safe(evidence)
+    evidence = make_json_safe(evidence)
+    if len(all_row_ids) > limit:
+        evidence.append({
+            "truncated": True,
+            "shown_rows": limit,
+            "total_rows": len(all_row_ids),
+        })
+    return evidence
 
 
 def _manifest_action_preview(before_df: pd.DataFrame, after_df: pd.DataFrame,
@@ -2411,11 +3194,25 @@ def _manifest_action_preview(before_df: pd.DataFrame, after_df: pd.DataFrame,
     """Build bounded, persisted Before/After evidence from an exact manifest."""
     manifest = manifest or {}
 
+    def frame_uses_uploaded_row_numbers(frame):
+        if not len(frame.index):
+            return False
+        if not pd.api.types.is_integer_dtype(frame.index.dtype):
+            return False
+        return int(frame.index.min()) == 0 and int(frame.index.max()) >= len(frame.index) - 1
+
+    before_uploaded_rows = frame_uses_uploaded_row_numbers(before_df)
+    after_uploaded_rows = frame_uses_uploaded_row_numbers(after_df)
+
     def display_row_number(row_id):
         try:
-            return int(row_id) + 1
+            numeric_id = int(row_id)
         except (TypeError, ValueError):
             return str(row_id)
+        for frame, uses_uploaded_rows in ((before_df, before_uploaded_rows), (after_df, after_uploaded_rows)):
+            if numeric_id in frame.index:
+                return numeric_id + 1 if uses_uploaded_rows else str(row_id)
+        return numeric_id + 1
 
     changed_all = manifest.get("changed_cells") or []
     removed_all = manifest.get("dropped_rows") or []
@@ -2690,14 +3487,10 @@ def preview_clean():
                     "missing_count": before_count,
                 })
         if unresolved_repairs:
-            return api_error(
-                "MISSING_STRATEGY_UNRESOLVED",
-                "A selected missing-value strategy could not change its current missing cells.",
-                status=422,
-                user_action="Choose another strategy or provide an explicit value.",
-                retryable=False,
-                details={"columns": unresolved_repairs},
-            )
+            report.setdefault("notices", []).extend([
+                f"{item['column']}: {item['strategy']} could not fill the current missing cells; choose another strategy or type a value."
+                for item in unresolved_repairs
+            ])
 
         # --- Persistent, independent undo/redo -------------------------------
         # Only real commits (persist_apply=1, sent by the frontend exactly
@@ -2728,12 +3521,16 @@ def preview_clean():
                     pass
                 if not has_prior_history:
                     try:
-                        manifest = snapshot_diff.compute_full_diff(df, cleaned_df)
+                        manifest = _operation_manifest(action_base_df, cleaned_df, report.get("operations"))
+                        if manifest is None:
+                            manifest = snapshot_diff.compute_full_diff(df, cleaned_df)
                     except Exception:
                         logging.exception("compute_full_diff failed on first action — continuing without a manifest")
             else:
                 try:
-                    manifest = snapshot_diff.compute_full_diff(previous_state, cleaned_df)
+                    manifest = _operation_manifest(previous_state, cleaned_df, report.get("operations"))
+                    if manifest is None:
+                        manifest = snapshot_diff.compute_full_diff(previous_state, cleaned_df)
                 except Exception:
                     logging.exception("compute_full_diff failed — continuing without a manifest")
                 try:
@@ -2746,12 +3543,32 @@ def preview_clean():
                 action_base_df, cleaned_df, report["manifest"]
             )
 
-        report["quality_breakdown"] = data_quality_breakdown(cleaned_df, df)
-        payload = build_clean_payload(df, cleaned_df, report, sid=sid, file_path=file_path)
+        can_patch_editor = persist_apply and report.get("manifest") is not None
+        needs_row_index_map = bool(
+            persist_apply
+            and (not can_patch_editor or (report.get("manifest") or {}).get("added_rows"))
+        )
+        # On large datasets the explainable quality score is the slowest part
+        # of Apply and does not affect the cleaned data, undo/reapply evidence,
+        # or exports. Keep it exact for normal/small data, and defer it for
+        # large data so Apply buttons stay responsive.
+        exact_quality_now = persist_apply and int(cleaned_df.shape[0] * cleaned_df.shape[1]) <= 500_000
+        payload = build_clean_payload(
+            df, cleaned_df, report, sid=sid, file_path=file_path,
+            include_editor_data=(persist_apply and not can_patch_editor),
+            include_row_index_map=needs_row_index_map,
+            manifest=report.get("manifest"),
+            include_quality=exact_quality_now,
+        )
         if persist_apply:
             operations = _enrich_operations_with_manifest(report.get("operations", []), report.get("manifest"))
             report["operations"] = operations
             payload["report"]["operations"] = operations
+            operation_notices = list(dict.fromkeys(
+                list(report.get("notices") or []) + _operation_notices(operations)
+            ))
+            if operation_notices:
+                payload["notices"] = operation_notices
             action_name = str(form_snapshot.get("action_name") or "Apply cleaning action")[:128]
             action_scope = str(form_snapshot.get("action_scope") or form_snapshot.get("preview_scope") or "")
             manifest_for_history = report.get("manifest")
@@ -2762,6 +3579,8 @@ def preview_clean():
                 "server_authoritative": True,
                 "preview": _manifest_action_preview(action_base_df, cleaned_df, manifest_for_history),
             }
+            if manifest_for_history:
+                payload["patch"] = build_manifest_patch(manifest_for_history, "forward")
             if client_applied_at_ms:
                 action_config["applied_at_ms"] = client_applied_at_ms
             rows_before = int(action_base_df.shape[0])
@@ -2769,7 +3588,8 @@ def preview_clean():
             cells_changed = _operation_cells_changed(operations, manifest_for_history)
             if not manifest_for_history and _df_fingerprint(action_base_df) == _df_fingerprint(cleaned_df):
                 payload["no_op"] = True
-                payload["no_op_message"] = "No changes needed."
+                payload["no_op_message"] = _no_op_message(operations, action_name)
+                payload["result_message"] = payload["no_op_message"]
                 payload["dataset_version"] = expected_version
                 if operation_token:
                     payload["operation_token"] = operation_token
@@ -2815,13 +3635,14 @@ def preview_clean():
                 flask_session["dataset_version"] = committed_version
             except db.StaleDatasetVersionError:
                 raise
-            except Exception:
+            except Exception as exc:
                 logging.exception("Committed apply failed while saving history/snapshot")
+                message, user_action = _operation_failure_explanation(exc, "save")
                 return api_error(
                     "ACTION_PERSISTENCE_FAILED",
-                    "The cleaning action could not be saved, so the dataset was left unchanged.",
+                    message,
                     status=500,
-                    user_action="Retry the action. If it fails again, copy the diagnostic ID.",
+                    user_action=user_action,
                     retryable=True,
                 )
             history_entries = []
@@ -2838,7 +3659,11 @@ def preview_clean():
             payload["history_entries"] = make_json_safe(history_entries)
             if history_entries:
                 payload["history_entry"] = make_json_safe(history_entries[0])
+            payload["result_message"] = _apply_result_message(history_actions, operation_notices)
             payload["dataset_version"] = committed_version
+            if payload.get("report", {}).get("manifest") is not None:
+                payload["report"]["has_manifest"] = True
+                payload["report"].pop("manifest", None)
             try:
                 if project_id:
                     active_metrics = _aggregate_active_history_metrics(
@@ -2874,7 +3699,8 @@ def preview_clean():
         )
     except Exception as e:
         logging.exception("preview_clean failed")
-        return api_error("INTERNAL_ERROR", "Preview failed before any changes were committed.", status=500, user_action="Retry the operation. If it fails again, copy the diagnostic ID.", retryable=True)
+        message, user_action = _operation_failure_explanation(e, "process")
+        return api_error("INTERNAL_ERROR", message, status=500, user_action=user_action, retryable=True)
 
 
 # --- Preview custom code -----------------------------------------------------
@@ -2882,24 +3708,27 @@ def preview_clean():
 @app.route("/preview_custom_code", methods=["POST"])
 def preview_custom_code():
     if not ENABLE_CUSTOM_CODE:
-        return jsonify({"error": "Custom code is disabled unless trusted local mode is enabled."}), 403
+        return api_error(
+            "CUSTOM_CODE_DISABLED", "Custom code is disabled outside trusted local mode.",
+            status=403, user_action="Run the desktop/local version to use Custom Pandas Code.", retryable=False,
+        )
     # Always enabled — local tool, no sandbox restriction
     filename = request.form.get("filename")
     if not filename:
-        return jsonify({"error": "No file specified."}), 400
+        return api_error("VALIDATION_ERROR", "No dataset was specified.", status=400, user_action="Upload or resume a project.")
 
     sid              = flask_session.get("upload_sid")
     session_filename = flask_session.get("upload_filename")
     if not sid or session_filename != filename:
-        return jsonify({"error": "Session mismatch. Please re-upload your file."}), 403
+        return api_error("SESSION_DATASET_MISMATCH", "The active dataset does not match this request.", status=403, user_action="Resume the project and retry.", retryable=True)
 
     file_path = os.path.join(UPLOAD_FOLDER, sid, filename)
     if not os.path.exists(file_path):
-        return jsonify({"error": "File not found."}), 404
+        return api_error("SOURCE_FILE_MISSING", "The original dataset could not be found.", status=404, user_action="Restore the source file or upload it again.")
 
     code = request.form.get("code", "").strip()
     if not code:
-        return jsonify({"error": "No code provided."}), 400
+        return api_error("CUSTOM_CODE_EMPTY", "The code cell is empty.", status=400, user_action="Enter Pandas code before running the cell.")
 
     try:
         form_snapshot = _FormProxy(request.form.to_dict(flat=False))
@@ -2920,9 +3749,15 @@ def preview_custom_code():
         })
     except Exception as e:
         logging.exception("preview_custom_code failed")
+        if isinstance(e, (SyntaxError, NameError, KeyError, TypeError, ValueError)):
+            detail = str(e).strip()[:300] or type(e).__name__
+            message = f"Custom code could not run: {detail}"
+            user_action = "Correct the indicated code or DataFrame reference, then run the cell again."
+        else:
+            message, user_action = _operation_failure_explanation(e, "process")
         return api_error(
-            "CUSTOM_CODE_PREVIEW_FAILED", "Custom code preview failed.", status=422,
-            user_action="Review the code and its DataFrame result, then try again.", retryable=False,
+            "CUSTOM_CODE_PREVIEW_FAILED", message, status=422,
+            user_action=user_action, retryable=False,
         )
 
 
@@ -2952,8 +3787,10 @@ def get_editor_data():
             if project:
                 dataset_version = int(project.get("state_version") or dataset_version)
                 flask_session["dataset_version"] = dataset_version
-            cdf, _history = replay_project_actions(int(project_id))
-            save_current_snapshot(sid, cdf)
+            cdf = load_current_snapshot(sid)
+            if cdf is None:
+                cdf, _history = replay_project_actions(int(project_id))
+                save_current_snapshot(sid, cdf)
         else:
             cdf = load_current_snapshot(sid)
             if cdf is None:
@@ -2971,7 +3808,8 @@ def get_editor_data():
         }))
     except Exception as e:
         logging.exception("get_editor_data failed")
-        return api_error("EDITOR_LOAD_FAILED", "The Dataset Editor could not load the current dataset.", status=500, user_action="Retry or resume the project.", retryable=True)
+        message, user_action = _operation_failure_explanation(e, "process")
+        return api_error("EDITOR_LOAD_FAILED", f"The Dataset Editor could not load: {message}", status=500, user_action=user_action, retryable=True)
 
 
 @app.route("/api/editor-page", methods=["GET"])
@@ -2988,8 +3826,10 @@ def editor_page():
     project_id = flask_session.get("project_id")
     if project_id:
         try:
-            df, _history = replay_project_actions(int(project_id))
-            save_current_snapshot(sid, df)
+            df = load_current_snapshot(sid)
+            if df is None:
+                df, _history = replay_project_actions(int(project_id))
+                save_current_snapshot(sid, df)
             project = db.get_project(int(project_id))
             if project:
                 flask_session["dataset_version"] = int(project.get("state_version") or flask_session.get("dataset_version", 0) or 0)
@@ -3129,16 +3969,16 @@ def download_project_version(project_id: int, version_id: int):
 def preview_outliers():
     filename = request.form.get("filename")
     if not filename:
-        return jsonify({"error": "No file specified"}), 400
+        return api_error("VALIDATION_ERROR", "No dataset was specified.", status=400, user_action="Upload or resume a project.")
 
     sid              = flask_session.get("upload_sid")
     session_filename = flask_session.get("upload_filename")
     if not sid or session_filename != filename:
-        return jsonify({"error": "Unauthorized"}), 403
+        return api_error("SESSION_DATASET_MISMATCH", "The active dataset does not match this request.", status=403, user_action="Resume the project and retry.", retryable=True)
 
     file_path = os.path.join(UPLOAD_FOLDER, sid, filename)
     if not os.path.exists(file_path):
-        return jsonify({"error": "File not found"}), 400
+        return api_error("SOURCE_FILE_MISSING", "The original dataset could not be found.", status=404, user_action="Restore the source file or upload it again.")
 
     try:
         expected_version = _require_session_version(request.form)
@@ -3165,11 +4005,17 @@ def preview_outliers():
             status=409, user_action="Refresh outlier candidates and select again.", retryable=True,
             details={"submitted_version": e.expected, "current_version": e.current},
         )
+    except (ValueError, TypeError, json.JSONDecodeError) as e:
+        return api_error(
+            "OUTLIER_SELECTION_INVALID", str(e), status=422,
+            user_action="Review the multiplier and selected numeric columns, then try again.", retryable=False,
+        )
     except Exception as e:
         logging.exception("preview_outliers failed")
+        message, user_action = _operation_failure_explanation(e, "process")
         return api_error(
-            "OUTLIER_PREVIEW_FAILED", "Outlier detection could not be completed.",
-            status=422, user_action="Review the selected numeric columns and try again.", retryable=False,
+            "OUTLIER_PREVIEW_FAILED", f"Outlier detection could not be completed: {message}",
+            status=500, user_action=user_action, retryable=True,
         )
 
 
@@ -3362,8 +4208,15 @@ def update_action_status(history_id: int):
         db.set_cleaning_action_status(history_id, status)
         return jsonify({"ok": True})
     except Exception as e:
-        logging.warning(f"update_action_status DB write failed: {e}")
-        return jsonify({"ok": False, "reason": str(e)}), 200
+        logging.exception("update_action_status DB write failed")
+        message, user_action = _operation_failure_explanation(e, "save")
+        return api_error(
+            "ACTION_STATUS_SAVE_FAILED",
+            f"The Change Log status could not be saved: {message}",
+            status=500,
+            user_action=user_action,
+            retryable=True,
+        )
 
 
 @app.route("/apply_manifest", methods=["POST"])
@@ -3398,7 +4251,8 @@ def apply_manifest_route():
         row = db.get_cleaning_action(int(history_id), project_id)
     except Exception as e:
         logging.warning(f"apply_manifest: history lookup failed: {e}")
-        return api_error("ACTION_LOOKUP_FAILED", "The action could not be loaded.", status=500, user_action="Retry or reopen the project.", retryable=True)
+        message, user_action = _operation_failure_explanation(e, "process")
+        return api_error("ACTION_LOOKUP_FAILED", f"The Change Log action could not be loaded: {message}", status=500, user_action=user_action, retryable=True)
 
     if not row:
         return api_error("ACTION_NOT_FOUND", "The action does not belong to this project.", status=404, user_action="Refresh the Change Log.", retryable=False)
@@ -3413,7 +4267,8 @@ def apply_manifest_route():
         new_df, _history = replay_project_actions(project_id, target_status=target_status)
     except Exception as e:
         logging.exception("apply_manifest: ordered replay failed")
-        return api_error("ORDERED_REPLAY_FAILED", "The project could not be rebuilt safely.", status=409, user_action="Check Project Details for missing or damaged history.", retryable=False)
+        message, user_action = _operation_failure_explanation(e, "process")
+        return api_error("ORDERED_REPLAY_FAILED", f"The project could not be rebuilt safely: {message}", status=409, user_action=user_action, retryable=False)
 
     filename  = flask_session.get("upload_filename")
     file_path = os.path.join(UPLOAD_FOLDER, sid, filename) if filename else None
@@ -3448,7 +4303,8 @@ def apply_manifest_route():
                 os.remove(tmp_path)
         except Exception:
             logging.exception("apply_manifest: failed to remove temp snapshot")
-        return api_error("UNDO_REAPPLY_PERSISTENCE_FAILED", "The action status and dataset were left unchanged.", status=500, user_action="Retry the operation.", retryable=True)
+        message, user_action = _operation_failure_explanation(e, "save")
+        return api_error("UNDO_REAPPLY_PERSISTENCE_FAILED", f"Undo/Reapply was not saved: {message}", status=500, user_action=user_action, retryable=True)
 
     active_metrics = _aggregate_active_history_metrics(_history, target_status=target_status)
     report = {
@@ -4045,20 +4901,13 @@ def resume_replay():
         for c in dt_cols:
             preview_df[c] = preview_df[c].dt.strftime("%Y-%m-%d %H:%M:%S")
 
-        changed_recs, changed_rnums, removed_rnums, added_rnums = compute_changed_rows(df, cleaned_df)
-        missing_remaining = [
-            {"column": col, "missing": int(cnt),
-             "percent": round(int(cnt) / len(cleaned_df) * 100, 2) if len(cleaned_df) else 0}
-            for col, cnt in cleaned_df.isna().sum().items() if int(cnt) > 0
-        ]
-
-        editor_data = df_to_rows_safe(cleaned_df)
-        row_index_map = {
-            str(i): int(idx) if isinstance(idx, (int, np.integer)) else str(idx)
-            for i, idx in enumerate(cleaned_df.index)
-        }
-
-        payload = build_clean_payload(df, cleaned_df, report, sid=sid, file_path=file_path)
+        payload = build_clean_payload(
+            df, cleaned_df, report, sid=sid, file_path=file_path,
+            include_editor_data=False,
+            include_changed_rows=False,
+        )
+        payload["editor_data"] = payload.get("preview", [])
+        payload["editor_data_is_sample"] = True
         payload.update({
             "ok": True,
             "success": True,
@@ -4067,9 +4916,10 @@ def resume_replay():
         return jsonify(make_json_safe(payload))
     except Exception as e:
         logging.exception("resume_replay failed")
+        message, user_action = _operation_failure_explanation(e, "process")
         return api_error(
-            "RESUME_REPLAY_FAILED", "The project could not be rebuilt from its source and action history.",
-            status=409, user_action="Open Project Details and check for missing source or action files.",
+            "RESUME_REPLAY_FAILED", f"The project could not be rebuilt from its source and action history: {message}",
+            status=409, user_action=user_action,
             retryable=False,
         )
 
@@ -4086,7 +4936,14 @@ def update_project_name_route(project_id: int):
         return jsonify({"ok": True, "name": name})
     except Exception as e:
         logging.exception("update_project_name failed")
-        return jsonify({"ok": False, "reason": str(e)}), 500
+        message, user_action = _operation_failure_explanation(e, "save")
+        return api_error(
+            "PROJECT_NAME_SAVE_FAILED",
+            f"The project name could not be saved: {message}",
+            status=500,
+            user_action=user_action,
+            retryable=True,
+        )
 
 
 # --- Project: update notes ---------------------------------------------------
@@ -4100,7 +4957,14 @@ def update_project_notes_route(project_id: int):
         return jsonify({"ok": True})
     except Exception as e:
         logging.exception("update_project_notes failed")
-        return jsonify({"ok": False, "reason": str(e)}), 500
+        message, user_action = _operation_failure_explanation(e, "save")
+        return api_error(
+            "PROJECT_NOTES_SAVE_FAILED",
+            f"The project notes could not be saved: {message}",
+            status=500,
+            user_action=user_action,
+            retryable=True,
+        )
 
 # --- Entry point -------------------------------------------------------------
 

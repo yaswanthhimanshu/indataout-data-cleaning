@@ -148,6 +148,23 @@
       box-shadow: 0 2px 8px rgba(249,115,22,.3);
     }
     .btn-resume:hover { background: var(--brand-dark); }
+    .btn-resume.is-loading {
+      opacity: .82;
+      pointer-events: none;
+      cursor: wait;
+    }
+    .btn-resume.is-loading::before {
+      content: "";
+      width: 13px;
+      height: 13px;
+      border: 2px solid currentColor;
+      border-right-color: transparent;
+      border-radius: 50%;
+      animation: resume-spin .7s linear infinite;
+    }
+    @keyframes resume-spin {
+      to { transform: rotate(360deg); }
+    }
 
     .btn-ghost {
       display: inline-flex; align-items: center; gap: 6px;
@@ -722,6 +739,29 @@ document.querySelectorAll('.history-view-details').forEach(btn => {
     btn.textContent = detail.classList.contains('show') ? 'Hide Full Changes' : 'View Full Changes';
   });
 });
+
+function resetResumeButton() {
+  document.querySelectorAll('.btn-resume').forEach(btn => {
+    btn.classList.remove('is-loading');
+    btn.removeAttribute('aria-busy');
+    if (btn.dataset.originalText) {
+      btn.textContent = btn.dataset.originalText;
+      delete btn.dataset.originalText;
+    }
+  });
+}
+
+document.querySelectorAll('.btn-resume').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.classList.contains('is-loading')) return;
+    btn.dataset.originalText = btn.textContent.trim();
+    btn.classList.add('is-loading');
+    btn.setAttribute('aria-busy', 'true');
+    btn.textContent = 'Resuming...';
+  });
+});
+
+window.addEventListener('pageshow', resetResumeButton);
 </script>
 <script src="{{ url_for('static', filename='desktop_downloads.js', v=static_version('desktop_downloads.js')) }}" defer></script>
 

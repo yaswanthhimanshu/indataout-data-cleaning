@@ -158,7 +158,13 @@ def compute_full_diff(before_df: pd.DataFrame, after_df: pd.DataFrame,
             a_na = acol.isna()
             both_present = ~b_na & ~a_na
             only_one_na  = b_na ^ a_na
-            diff_mask = ((both_present & (bcol != acol)) | only_one_na).astype(bool)
+            different_present = pd.Series(False, index=common_index, dtype=bool)
+            if bool(both_present.any()):
+                present_idx = common_index[both_present.to_numpy()]
+                left = bcol.loc[present_idx].astype(object)
+                right = acol.loc[present_idx].astype(object)
+                different_present.loc[present_idx] = left.ne(right).fillna(False).to_numpy(dtype=bool)
+            diff_mask = (different_present | only_one_na).astype(bool)
             changed_idx = common_index[diff_mask.to_numpy()]
             for idx in changed_idx:
                 if cell_limit is not None and n_added >= cell_limit:
@@ -236,11 +242,26 @@ def _coerce_to_column_dtype(value, dtype):
     return value
 
 
-def _cast_column_dtype(series: pd.Series, dtype_name: str) -> pd.Series:
+def _assign_manifest_value(df: pd.DataFrame, row: Any, col: str, value: Any) -> None:
+    """Assign one replayed cell without losing categorical column semantics."""
+    coerced = _coerce_to_column_dtype(value, df[col].dtype)
+    if isinstance(df[col].dtype, pd.CategoricalDtype) and coerced is not None:
+        try:
+            is_missing = bool(pd.isna(coerced))
+        except (TypeError, ValueError):
+            is_missing = False
+        if not is_missing and coerced not in df[col].cat.categories:
+            df[col] = df[col].cat.add_categories([coerced])
+    df.at[row, col] = coerced
+
+
+def _cast_column_dtype(series: pd.Series, dtype_name: str, requested_type: str = "") -> pd.Series:
     """Best-effort dtype replay for type-conversion-only actions."""
     if not dtype_name:
         return series
     try:
+        if requested_type == "string":
+            return series.map(lambda value: np.nan if pd.isna(value) else str(value)).astype(object)
         if dtype_name.startswith("datetime64"):
             return pd.to_datetime(series, errors="coerce")
         if dtype_name in ("Int64", "Int32", "Int16", "Int8"):
@@ -289,7 +310,8 @@ def apply_manifest(current_df: pd.DataFrame, manifest: Dict[str, Any], direction
         if col not in df.columns:
             conflicts.append(f"dtype change on missing column '{col}' skipped (column no longer exists)")
             continue
-        df[col] = _cast_column_dtype(df[col], item.get(dtype_key))
+        requested_type = str(item.get("requested") or "") if direction == "forward" else ""
+        df[col] = _cast_column_dtype(df[col], item.get(dtype_key), requested_type=requested_type)
 
     # --- changed cells: forward -> "after" value, reverse -> "before" value ---
     value_key = "after" if direction == "forward" else "before"
@@ -302,7 +324,7 @@ def apply_manifest(current_df: pd.DataFrame, manifest: Dict[str, Any], direction
         if row not in df.index:
             conflicts.append(f"cell change on missing row {row} skipped (row no longer exists)")
             continue
-        df.at[row, col] = _coerce_to_column_dtype(item[value_key], df[col].dtype)
+        _assign_manifest_value(df, row, col, item[value_key])
 
     # --- rows: forward removes dropped_rows / adds added_rows; reverse is the mirror ---
     rows_to_remove = dropped_rows if direction == "forward" else added_rows

@@ -225,6 +225,39 @@ class CleaningCoreCorrectnessTests(unittest.TestCase):
         self.assertEqual(operations["fill_numeric"]["column_strategies"], {"measure one": "median"})
         self.assertEqual(operations["fill_categorical"]["column_strategies"], {"label.kind": "mode"})
 
+    def test_constant_categorical_fill_adds_unknown_category_first(self):
+        frame = pd.DataFrame({
+            "segment": pd.Series(["Retail", None, "SMB"], dtype="category")
+        })
+
+        cleaned, meta = cleaner.fill_categorical(
+            frame,
+            strategy="constant",
+            columns=["segment"],
+        )
+
+        self.assertEqual(cleaned.loc[1, "segment"], "Unknown")
+        self.assertIn("Unknown", cleaned["segment"].cat.categories)
+        self.assertEqual(meta["filled_cells"], 1)
+        self.assertEqual(meta["details"]["segment"]["row_ids"], ["1"])
+
+    def test_manifest_replay_adds_new_categorical_value_before_assignment(self):
+        before = pd.DataFrame({
+            "segment": pd.Series(["Retail", None, "SMB"], dtype="category")
+        })
+        after = before.copy()
+        after["segment"] = after["segment"].cat.add_categories(["Unknown"])
+        after.loc[1, "segment"] = "Unknown"
+
+        manifest = snapshot_diff.compute_full_diff(before, after)
+        replayed = snapshot_diff.apply_manifest(before, manifest, "forward")["df"]
+
+        self.assertEqual(replayed.loc[1, "segment"], "Unknown")
+        self.assertIn("Unknown", replayed["segment"].cat.categories)
+
+        restored = snapshot_diff.apply_manifest(replayed, manifest, "reverse")["df"]
+        self.assertTrue(pd.isna(restored.loc[1, "segment"]))
+
     def test_typed_missing_cells_use_exact_row_and_column_identity(self):
         frame = pd.DataFrame({"A value": [None, "keep"], "B.value": [1, None]})
         cleaned, report = cleaner.clean_dataframe(frame, options={

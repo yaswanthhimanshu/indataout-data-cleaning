@@ -479,12 +479,18 @@ class CanvasGrid {
     const orig = this.data[row] ? this.data[row][key] : '';
     const val  = this._input.value;
     const origStr = orig === null || orig === undefined ? '' : String(orig);
+    const hadPending = Object.prototype.hasOwnProperty.call(this.changes, ck);
+    const previousPendingValue = hadPending ? this.changes[ck] : undefined;
     if (val !== origStr) {
       this.changes[ck] = val;
-      if (this.opts.onCellChange) this.opts.onCellChange(row, key, val, origStr);
+      if (!hadPending || previousPendingValue !== val) {
+        if (this.opts.onCellChange) this.opts.onCellChange(row, key, val, origStr);
+      }
     } else {
-      delete this.changes[ck];
-      if (this.opts.onCellChange) this.opts.onCellChange(row, key, val, origStr);
+      if (hadPending) {
+        delete this.changes[ck];
+        if (this.opts.onCellChange) this.opts.onCellChange(row, key, val, origStr);
+      }
     }
     this._input.style.display = 'none';
     this._input._row = undefined;
@@ -550,6 +556,7 @@ function indataoutInstallRequestAndProgress() {
     return nativeFetch(input, opts);
   };
   let progressTimer = null;
+  let progressHideTimer = null;
   let progressStarted = 0;
   function updateElapsed() {
     const el = document.getElementById('operationProgressElapsed');
@@ -561,6 +568,8 @@ function indataoutInstallRequestAndProgress() {
       const box = document.getElementById('operationProgress');
       if (!box) return;
       progressStarted = Date.now();
+      clearTimeout(progressHideTimer);
+      progressHideTimer = null;
       box.hidden = false;
       box.classList.remove('is-success', 'is-error');
       const n = document.getElementById('operationProgressName');
@@ -586,13 +595,19 @@ function indataoutInstallRequestAndProgress() {
       updateElapsed();
       box.classList.toggle('is-success', kind !== 'error');
       box.classList.toggle('is-error', kind === 'error');
+      const s = document.getElementById('operationProgressStage');
+      if (s) s.textContent = kind === 'error' ? 'Could not complete' : 'Completed';
       const r = document.getElementById('operationProgressResult');
       if (r) r.textContent = message || (kind === 'error' ? 'Failed' : 'Completed');
     },
-    hideLater(ms = 2200) {
+    hideLater(ms = 8000) {
       const box = document.getElementById('operationProgress');
       if (!box) return;
-      setTimeout(() => { box.hidden = true; }, ms);
+      clearTimeout(progressHideTimer);
+      progressHideTimer = setTimeout(() => {
+        box.hidden = true;
+        progressHideTimer = null;
+      }, ms);
     }
   };
 }
@@ -850,8 +865,8 @@ document.addEventListener('DOMContentLoaded', () => {
     datasetTabs.forEach(tab => {
       tab.classList.toggle('active', tab.dataset.datasetSlide === slideId);
     });
-    if (slideId === 'datasetEditorSlide' && window._ido.refreshCurrentEditorFromServer) {
-      window._ido.refreshCurrentEditorFromServer();
+    if (slideId === 'datasetEditorSlide' && window._ido.ensureEditorDataLoaded) {
+      window._ido.ensureEditorDataLoaded();
     }
   }
 
@@ -1623,7 +1638,10 @@ document.addEventListener('DOMContentLoaded', () => {
       const item = input?.closest('.opt-item');
       if (!item) return;
       input.checked = false;
-      input.disabled = count === 0;
+      // Keep the switch interactive even after the issue is resolved. A
+      // disabled toggle feels broken when the user comes back to the section;
+      // the Apply button/no-op response handles the "nothing left to do" case.
+      input.disabled = false;
       item.classList.toggle('is-resolved', count === 0);
       const countBadge = Array.from(item.querySelectorAll('.badge')).find(badge => /found|resolved/i.test(badge.textContent));
       if (countBadge) countBadge.textContent = count ? `${count} found` : 'Resolved';
@@ -2810,6 +2828,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderLiveMetrics(summary) {
     if (!liveMetrics || !summary) return;
+    const qualityText = summary.quality_pending
+      ? 'Data quality: recalculates outside fast response'
+      : `Data quality: ${summary.quality_before} -> ${summary.quality_after}`;
     liveMetrics.innerHTML = [
       `Rows: ${summary.rows_before} -> ${summary.rows_after}`,
       `Columns: ${summary.cols_after}`,
@@ -2817,7 +2838,7 @@ document.addEventListener('DOMContentLoaded', () => {
       `Duplicates removed: ${summary.duplicates_removed}`,
       `Outliers removed: ${summary.outliers_removed}`,
       `Cleaning completeness: ${summary.cleaning_completeness || 100}`,
-      `Data quality: ${summary.quality_before} -> ${summary.quality_after}`
+      qualityText
     ].map(text => `<span>${escapeHtml(text)}</span>`).join('');
   }
 
@@ -2895,8 +2916,18 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // --- Show a real visible error in the progress log -----------------------
+  function formatApiError(error, fallback = 'Operation failed') {
+    if (!error || typeof error !== 'object') return String(error || fallback);
+    const parts = [String(error.message || fallback)];
+    if (error.user_action) parts.push(`Next: ${error.user_action}`);
+    if (error.request_id) parts.push(`Diagnostic ID: ${error.request_id}`);
+    return parts.join(' ');
+  }
+  window._ido = window._ido || {};
+  window._ido.formatApiError = formatApiError;
+
   function showPreviewError(msg, isSessionExpired) {
-    if (msg && msg.message) msg = msg.message;
+    msg = formatApiError(msg, 'Operation failed');
     const html = isSessionExpired
       ? `<div class="live-log-error">⚠️ ${escapeHtml(msg)} <a href="/projects" style="color:inherit;font-weight:600;text-decoration:underline">Go to My Projects</a> to reopen this file.</div>`
       : `<div class="live-log-error">❌ ${escapeHtml(msg)}</div>`;
@@ -2968,7 +2999,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (data.error?.code === 'STALE_DATASET_VERSION' && window._ido.refreshCurrentProjectFromServer) {
           await window._ido.refreshCurrentProjectFromServer(data.error?.details?.current_version);
         }
-        showPreviewError(data.error?.message || data.error || 'Preview failed', data.session_expired);
+        showPreviewError(data.error || 'Preview failed', data.session_expired);
         return;
       }
       if (persistApply && window._ido.refreshAuthoritativeProjectState) {
@@ -3045,13 +3076,25 @@ document.addEventListener('DOMContentLoaded', () => {
         highlightChangedRows(data.report.changed_row_numbers, data.report.removed_row_numbers || []);
       }
       applyWorkingColumns(data.report && data.report.cleaned_columns);
-      if (persistApply && window._ido && window._ido.refreshEditorCanvas) {
-        window._ido.refreshEditorCanvas(
-          data.editor_columns || (data.report && data.report.cleaned_columns),
-          data.editor_data || [],
-          data.row_index_map,
-          data.dataset_version
-        );
+      if (persistApply && window._ido) {
+        if (data.patch && window._ido.patchEditorCanvas) {
+          window._ido.patchEditorCanvas(data.patch, data.row_index_map);
+          const responseVersion = Number(data.dataset_version);
+          if (Number.isFinite(responseVersion)) {
+            window._ido.datasetVersion = responseVersion;
+            document.body.dataset.datasetVersion = String(responseVersion);
+            document.querySelectorAll('[name="dataset_version"]').forEach(input => {
+              input.value = String(responseVersion);
+            });
+          }
+        } else if (Array.isArray(data.editor_data) && window._ido.refreshEditorCanvas) {
+          window._ido.refreshEditorCanvas(
+            data.editor_columns || (data.report && data.report.cleaned_columns),
+            data.editor_data,
+            data.row_index_map,
+            data.dataset_version
+          );
+        }
       }
       if (persistApply) {
         syncDatasetEditorFromPreview(
@@ -3120,7 +3163,7 @@ document.addEventListener('DOMContentLoaded', () => {
           }
           showToast(noChangeMsg, 'success');
           if (window._ido.operationProgress) {
-            window._ido.operationProgress.finish('success', 'No changes needed');
+            window._ido.operationProgress.finish('success', data.result_message || noChangeMsg);
             window._ido.operationProgress.hideLater();
           }
           return;
@@ -3150,7 +3193,7 @@ document.addEventListener('DOMContentLoaded', () => {
           }
           showToast(noChangeMsg, 'success');
           if (window._ido.operationProgress) {
-            window._ido.operationProgress.finish('success', 'No changes needed');
+            window._ido.operationProgress.finish('success', data.result_message || noChangeMsg);
             window._ido.operationProgress.hideLater();
           }
           return;
@@ -3192,7 +3235,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       }
       if (window._ido.operationProgress) {
-        window._ido.operationProgress.finish('success', persistApply ? 'Applied' : 'Preview completed');
+        window._ido.operationProgress.finish(
+          'success',
+          persistApply ? (data.result_message || 'Applied successfully') : 'Preview completed'
+        );
         window._ido.operationProgress.hideLater();
       }
     } catch (error) {
@@ -3306,17 +3352,8 @@ document.addEventListener('DOMContentLoaded', () => {
             highlightChangedRows(data.report.changed_row_numbers, data.report.removed_row_numbers || []);
           }
           applyWorkingColumns(data.report && data.report.cleaned_columns);
-          // Resets the canvas grid's own dirty-tracking baseline to this
-          // apply's result. Without this call, grid.getChanges() would keep
-          // reporting these same edits as "still pending" forever.
-          if (window._ido && window._ido.refreshEditorCanvas) {
-            window._ido.refreshEditorCanvas(
-              data.editor_columns || (data.report && data.report.cleaned_columns),
-              data.editor_data || [],
-              data.row_index_map,
-              data.dataset_version
-            );
-          }
+          // refreshAuthoritativeProjectState already patches or refreshes the
+          // CanvasGrid and resets the dirty-cell baseline.
           renderLiveMetrics(data.summary);
           syncMissingEditorFromPreview(data.preview, data.report && data.report.preview_row_numbers, data.report && data.report.cleaned_columns, data.summary, data.analysis);
           updateMissingReviewState(data.summary);
@@ -3606,12 +3643,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         } else {
           if (outlierStatus) outlierStatus.textContent = 'Outlier preview failed.';
-          alert('Error detecting outliers: ' + data.error);
+          showPreviewError(data.error || 'Outlier preview failed', data.session_expired);
         }
       } catch (error) {
         console.error('Error:', error);
         if (outlierStatus) outlierStatus.textContent = 'Outlier preview failed.';
-        alert('Error detecting outliers');
+        showPreviewError('Outlier preview could not reach the server. Next: Check that the app is still running, then retry.', false);
       } finally {
         previewOutliersBtn.disabled = false;
         previewOutliersBtn.textContent = '🔍 Preview Outliers';
@@ -3772,7 +3809,7 @@ document.addEventListener('DOMContentLoaded', () => {
           await window._ido.refreshCurrentProjectFromServer(data.error?.details?.current_version);
         }
         if (window._ido.showToast) {
-          window._ido.showToast(`Undo/Reapply couldn't reach the server state (${data.reason || 'unknown reason'}) — no changes were made.`, 'error');
+          window._ido.showToast(window._ido.formatApiError(data.error || data.reason, 'Undo/Reapply failed. No changes were made.'), 'error');
         }
         return false;  // no_manifest / no_snapshot / etc. — fall back
       }
@@ -3788,7 +3825,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (e) {
       console.warn('apply_manifest request failed:', e);
       if (window._ido.showToast) {
-        window._ido.showToast('Undo/Reapply could not reach the server. Nothing was changed.', 'error');
+        window._ido.showToast('Undo/Reapply could not reach the server. Nothing was changed. Next: Check that the app is still running, then retry.', 'error');
       }
       return false;
     }
@@ -5640,7 +5677,7 @@ df.isna().sum()">${_esc(cell.code)}</textarea>
       fd.append('code', code);
       const resp = await fetch('/preview_custom_code', { method: 'POST', body: fd });
       const data = await resp.json();
-      if (!data.success) throw new Error(data.error || 'Run failed');
+      if (!data.success) throw new Error(window._ido.formatApiError(data.error, 'Run failed'));
       const blocks = data.output_blocks || [];
       const rowsBefore = data.rows_before || 0;
       const rowsAfter  = data.rows_after  || 0;
@@ -5694,28 +5731,14 @@ df.isna().sum()">${_esc(cell.code)}</textarea>
       const snap = _captureSnap();
       const resp = await fetch('/preview_clean', { method: 'POST', body: fd });
       const data = await resp.json();
-      if (!data.success) throw new Error(data.error || 'Apply failed');
+      if (!data.success) throw new Error(window._ido.formatApiError(data.error, 'Apply failed'));
       if (window._ido.refreshAuthoritativeProjectState &&
           !window._ido.refreshAuthoritativeProjectState(data)) return;
       if (window._ido.renderLivePreview)           window._ido.renderLivePreview(data.preview, data.report?.cleaned_columns, data.report?.operations, data.report?.preview_row_numbers);
       if (window._ido.applyWorkingColumns)         window._ido.applyWorkingColumns(data.report?.cleaned_columns);
       if (window._ido.syncDatasetEditorFromPreview) window._ido.syncDatasetEditorFromPreview(data.preview, data.report?.preview_row_numbers, data.report?.cleaned_columns);
-      // syncDatasetEditorFromPreview (above) only updates the lightweight
-      // preview table — the actual interactive CanvasGrid in the Dataset
-      // Editor tab is a separate thing entirely and only refreshEditorCanvas
-      // touches it. Every other Apply path (previewCleaning, applyDatasetEditsBtn)
-      // already calls this; applyCell (custom code) was the one path that
-      // didn't, so rows/values a custom code cell changed or removed never
-      // showed up in the Dataset Editor until some other panel's apply
-      // happened to trigger a refresh.
-      if (window._ido.refreshEditorCanvas) {
-        window._ido.refreshEditorCanvas(
-          data.editor_columns || data.report?.cleaned_columns,
-          data.editor_data || [],
-          data.row_index_map,
-          data.dataset_version
-        );
-      }
+      // refreshAuthoritativeProjectState already patches or refreshes the
+      // CanvasGrid when the server returns editor data.
       if (window._ido.renderLiveMetrics)           window._ido.renderLiveMetrics(data.summary);
       if (window._ido.syncMissingEditorFromPreview) window._ido.syncMissingEditorFromPreview(data.preview, data.report?.preview_row_numbers, data.report?.cleaned_columns, data.summary, data.analysis);
       if (window._ido.updateMissingReviewState)    window._ido.updateMissingReviewState(data.summary);
@@ -5862,7 +5885,7 @@ df.isna().sum()">${_esc(cell.code)}</textarea>
       if (window._ido.refreshAuthoritativeProjectState) {
         window._ido.refreshAuthoritativeProjectState(replayData);
       }
-      if (window._ido.refreshEditorCanvas) {
+      if (window._ido.refreshEditorCanvas && Array.isArray(replayData.editor_data) && !replayData.editor_data_is_sample) {
         window._ido.refreshEditorCanvas(replayData.editor_columns, replayData.editor_data, replayData.row_index_map, replayData.dataset_version);
       }
       if (window._ido.syncDatasetEditorFromPreview) window._ido.syncDatasetEditorFromPreview(replayData.preview, replayData.preview_row_numbers, replayData.editor_columns);
@@ -6046,16 +6069,10 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     window._ido.appliedControlEntries = Array.from(map.entries());
 
-    // Continuously sync Change Log: debounced live preview after each cell edit
+    // Dataset Editor edits stay local until the user clicks Apply Edited Cells.
+    // Running a backend preview on every cell blur/click made harmless
+    // navigation feel like a fake Apply and could show stale pending status.
     clearTimeout(syncChanges._debounceTimer);
-    if (changes.length > 0) {
-      syncChanges._debounceTimer = setTimeout(() => {
-        if (window._ido.triggerPreviewCleaning) {
-          const editorSlide = document.getElementById('datasetEditorSlide');
-          window._ido.triggerPreviewCleaning('Dataset edits preview', editorSlide, 'manual', false);
-        }
-      }, 600);
-    }
   }
   window._ido.syncEditorGridChanges = () => syncChanges(window._ido.editorGrid);
 
@@ -6067,23 +6084,15 @@ document.addEventListener('DOMContentLoaded', () => {
     onCellChange: () => syncChanges(window._ido.editorGrid),
   });
 
-  // Load full dataset into editor on page load via get_editor_data
+  // Load the full editor only when the Dataset Editor is actually visible.
+  // Large files can take several seconds to hydrate into the canvas; doing it
+  // eagerly on upload/resume slows every workflow even when the user is only
+  // applying cleaning controls.
   (function loadEditorOnInit() {
-    const filename = document.querySelector('input[name="filename"]')?.value;
-    if (!filename || !editorColumns.length) return;
-    const fd = new FormData();
-    fd.append('filename', filename);
-    const requestVersion = Number(window._ido.datasetVersion || 0);
-    fd.append('dataset_version', String(requestVersion));
-    fetch('/get_editor_data', { method: 'POST', body: fd })
-      .then(r => r.json())
-      .then(d => {
-        if (!d.success || !d.data) return;
-        const responseVersion = Number(d.dataset_version);
-        if (Number.isFinite(responseVersion) && responseVersion < Number(window._ido.datasetVersion || 0)) return;
-        window._ido.refreshEditorCanvas(d.columns || editorColumns, d.data, d.row_index_map, responseVersion);
-      })
-      .catch(e => console.warn('Editor init load failed:', e));
+    const editorSlide = document.getElementById('datasetEditorSlide');
+    if (editorSlide && editorSlide.classList.contains('active') && window._ido.ensureEditorDataLoaded) {
+      window._ido.ensureEditorDataLoaded();
+    }
   })();
 
   // ── 3. After preview/Apply → update editor directly from response ─────────
@@ -6136,6 +6145,14 @@ document.addEventListener('DOMContentLoaded', () => {
       .filter(p => p !== undefined)
       .sort((a, b) => b - a);
     removePositions.forEach(pos => grid.removeRow(pos));
+    if (!newRowIndexMap && removePositions.length) {
+      const labels = Object.keys(rowIndexMap)
+        .sort((a, b) => parseInt(a, 10) - parseInt(b, 10))
+        .map(pos => rowIndexMap[pos]);
+      removePositions.forEach(pos => labels.splice(pos, 1));
+      Object.keys(rowIndexMap).forEach(k => delete rowIndexMap[k]);
+      labels.forEach((label, pos) => { rowIndexMap[String(pos)] = label; });
+    }
 
     // 4. Row additions — resolve each row's FINAL position from the server's
     // authoritative new map, ascending order (see patchEditorCanvas doc above
@@ -6159,6 +6176,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (hiddenInputs) hiddenInputs.innerHTML = '';
     if (changeCountEl) { changeCountEl.textContent = '0 changes pending'; changeCountEl.style.color = ''; }
+    window._ido._editorLoadedVersion = Number(window._ido.datasetVersion || 0);
     window._ido._datasetEditorLedgerBaseline = (window._ido.appliedControlEntries || []).slice();
   };
 
@@ -6184,6 +6202,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const cols = columns || editorColumns;
     const rows = data || [];
     window._ido.editorGrid.setData(cols, rows);
+    window._ido._editorLoadedVersion = Number(window._ido.datasetVersion || 0);
     const rowCount = rows.length;
     const rowMeta = document.getElementById('editorRowMeta');
     const rowsLoaded = document.getElementById('editorRowsLoaded');
@@ -6206,22 +6225,39 @@ document.addEventListener('DOMContentLoaded', () => {
   window._ido.refreshCurrentEditorFromServer = async function () {
     const filename = document.querySelector('input[name="filename"]')?.value;
     if (!filename || !window._ido.editorGrid) return false;
+    const currentVersion = Number(window._ido.datasetVersion || 0);
+    if (
+      window._ido.editorGrid.data.length > 0 &&
+      Number(window._ido._editorLoadedVersion) === currentVersion
+    ) {
+      return true;
+    }
+    if (window._ido._editorLoadPromise) return window._ido._editorLoadPromise;
     const fd = new FormData();
     fd.append('filename', filename);
-    fd.append('dataset_version', String(window._ido.datasetVersion || 0));
-    try {
+    fd.append('dataset_version', String(currentVersion));
+    window._ido._editorLoadPromise = (async () => {
       const response = await fetch('/get_editor_data', { method: 'POST', body: fd });
       const data = await response.json();
-      if (!data.success || !data.data) return false;
+      if (!data.success || !data.data) {
+        if (window._ido.showToast) {
+          window._ido.showToast(window._ido.formatApiError(data.error, 'The Dataset Editor could not load.'), 'error');
+        }
+        return false;
+      }
       const responseVersion = Number(data.dataset_version);
       if (Number.isFinite(responseVersion) && responseVersion < Number(window._ido.datasetVersion || 0)) return false;
       window._ido.refreshEditorCanvas(data.columns || editorColumns, data.data, data.row_index_map, responseVersion);
       return true;
-    } catch (err) {
-      console.warn('Editor authoritative refresh failed:', err);
-      return false;
-    }
+    })().catch(err => {
+        console.warn('Editor authoritative refresh failed:', err);
+        return false;
+      }).finally(() => {
+        window._ido._editorLoadPromise = null;
+      });
+    return window._ido._editorLoadPromise;
   };
+  window._ido.ensureEditorDataLoaded = window._ido.refreshCurrentEditorFromServer;
 
   const editToggleBtn = document.getElementById('editorEditToggle');
   let editingEnabled = false;

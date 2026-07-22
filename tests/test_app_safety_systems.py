@@ -295,6 +295,196 @@ class AppSafetySystemsTests(unittest.TestCase):
         self.assertEqual(operation["count"], 1)
         self.assertEqual(app_module.load_current_snapshot(sid).loc[0, "score"], 5.0)
 
+    def test_committed_missing_value_section_splits_numeric_and_text_fills(self):
+        sid, filename, _path = self._seed_project_session_file(
+            content=(
+                "name,age,score,city,feedback\n"
+                "A,,10,Pune,\n"
+                "B,22,,,\n"
+                "C,,30,Chennai,Good\n"
+            )
+        )
+
+        inserted = []
+
+        def fake_many(project_id, actions, expected_version, before_commit):
+            before_commit([101, 102])
+            for offset, action in enumerate(actions, start=1):
+                inserted.append({
+                    "id": 100 + offset,
+                    "version_before": expected_version + offset - 1,
+                    "version_after": expected_version + offset,
+                })
+            return inserted
+
+        with self.client.session_transaction() as sess:
+            sess["project_id"] = 77
+            sess["dataset_version"] = 0
+
+        with mock.patch.object(app_module.db, "get_cleaning_history", return_value=[]), \
+             mock.patch.object(app_module.db, "log_cleaning_actions_atomic", side_effect=fake_many):
+            response = self.client.post("/preview_clean", data={
+                "filename": filename,
+                "persist_apply": "1",
+                "preview_scope": "feature",
+                "action_scope": "missingValuesGroup",
+                "action_name": "Applied section only: Missing Values",
+                "missing_strategy": "fill",
+                "fill_numeric": "skip",
+                "fill_numeric_col[age]": "zero",
+                "fill_numeric_col[score]": "median",
+                "fill_categorical": "skip",
+                "fill_categorical_col[city]": "constant",
+                "fill_categorical_col[feedback]": "mode",
+            })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        actions = payload["history_entries"]
+        self.assertEqual([item["action_name"] for item in actions], ["fill_numeric", "fill_categorical"])
+        snapshot = app_module.load_current_snapshot(sid)
+        self.assertEqual(snapshot.loc[0, "age"], 0)
+        self.assertEqual(snapshot.loc[1, "score"], 20)
+        self.assertEqual(snapshot.loc[1, "city"], "Unknown")
+        self.assertEqual(snapshot.loc[0, "feedback"], "Good")
+
+    def test_resumed_categorical_snapshot_commits_mixed_missing_fills(self):
+        sid, filename, _path = self._seed_project_session_file(
+            content=(
+                "age,orders_count,city,segment\n"
+                ",1,Pune,Retail\n"
+                "22,,Mumbai,\n"
+                ",3,,SMB\n"
+            )
+        )
+        resumed = pd.DataFrame({
+            "age": [None, 22.0, None],
+            "orders_count": [1.0, None, 3.0],
+            "city": pd.Series(["Pune", "Mumbai", None], dtype="category"),
+            "segment": pd.Series(["Retail", None, "SMB"], dtype="category"),
+        })
+        app_module.save_current_snapshot(sid, resumed)
+
+        inserted = []
+
+        def fake_many(project_id, actions, expected_version, before_commit):
+            before_commit([201, 202])
+            for offset, _action in enumerate(actions, start=1):
+                inserted.append({
+                    "id": 200 + offset,
+                    "version_before": expected_version + offset - 1,
+                    "version_after": expected_version + offset,
+                })
+            return inserted
+
+        with self.client.session_transaction() as sess:
+            sess["dataset_version"] = 0
+
+        with mock.patch.object(app_module.db, "get_cleaning_history", return_value=[]), \
+             mock.patch.object(app_module.db, "log_cleaning_actions_atomic", side_effect=fake_many):
+            response = self.client.post("/preview_clean", data={
+                "filename": filename,
+                "persist_apply": "1",
+                "preview_scope": "section",
+                "action_scope": "missingValuesGroup",
+                "action_name": "Applied section only: Missing Values",
+                "missing_strategy": "fill",
+                "fill_numeric": "skip",
+                "fill_numeric_col[age]": "zero",
+                "fill_numeric_col[orders_count]": "zero",
+                "fill_categorical": "skip",
+                "fill_categorical_col[city]": "constant",
+                "fill_categorical_col[segment]": "constant",
+            })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(
+            [item["action_name"] for item in payload["history_entries"]],
+            ["fill_numeric", "fill_categorical"],
+        )
+        snapshot = app_module.load_current_snapshot(sid)
+        self.assertEqual(snapshot.loc[0, "age"], 0)
+        self.assertEqual(snapshot.loc[1, "orders_count"], 0)
+        self.assertEqual(snapshot.loc[2, "city"], "Unknown")
+        self.assertEqual(snapshot.loc[1, "segment"], "Unknown")
+
+    def test_missing_section_applies_valid_fill_and_explains_unavailable_mode(self):
+        sid, filename, _path = self._seed_project_session_file(
+            content="name,age,segment\nA,,\nB,22,\n"
+        )
+
+        def fake_atomic(**kwargs):
+            kwargs["before_commit"](103)
+            return 103
+
+        with mock.patch.object(app_module.db, "get_cleaning_history", return_value=[]), \
+             mock.patch.object(app_module.db, "log_cleaning_action_atomic", side_effect=fake_atomic):
+            response = self.client.post("/preview_clean", data={
+                "filename": filename,
+                "persist_apply": "1",
+                "preview_scope": "section",
+                "action_scope": "missingValuesGroup",
+                "action_name": "Applied section only: Missing Values",
+                "missing_strategy": "fill",
+                "fill_numeric": "skip",
+                "fill_numeric_col[age]": "zero",
+                "fill_categorical": "skip",
+                "fill_categorical_col[segment]": "mode",
+            })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        self.assertNotIn("no_op", payload)
+        self.assertIn("segment", " ".join(payload["notices"]))
+        self.assertIn("Skipped:", payload["result_message"])
+        snapshot = app_module.load_current_snapshot(sid)
+        self.assertEqual(snapshot.loc[0, "age"], 0)
+        self.assertTrue(snapshot["segment"].isna().all())
+
+    def test_unavailable_missing_strategy_returns_clear_no_change_result(self):
+        _sid, filename, _path = self._seed_session_file(
+            content="name,segment\nA,\nB,\n"
+        )
+        response = self.client.post("/preview_clean", data={
+            "filename": filename,
+            "persist_apply": "1",
+            "preview_scope": "feature",
+            "action_scope": "missingValuesGroup",
+            "action_name": "Applied feature only: Fill Text Missing Values",
+            "missing_strategy": "fill",
+            "fill_numeric": "skip",
+            "fill_categorical": "skip",
+            "fill_categorical_col[segment]": "mode",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        self.assertTrue(payload["no_op"])
+        self.assertIn("No changes were applied", payload["no_op_message"])
+        self.assertIn("segment", payload["no_op_message"])
+
+    def test_duplicate_noop_explains_that_no_duplicates_exist(self):
+        _sid, filename, _path = self._seed_session_file(content="x,y\nA,1\nB,2\n")
+        response = self.client.post("/preview_clean", data={
+            "filename": filename,
+            "persist_apply": "1",
+            "preview_scope": "feature",
+            "action_scope": "removeDuplicatesGroup",
+            "action_name": "Applied feature only: Remove Duplicate Rows",
+            "remove_duplicates": "1",
+            "missing_strategy": "ignore",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["no_op"])
+        self.assertIn("No duplicate rows were found", payload["result_message"])
+
     def test_committed_manual_dtype_conversion_saves_reversible_dtype_manifest(self):
         sid, filename, _path = self._seed_project_session_file(content="code,score\nA,1\nB,2\n")
 
@@ -333,6 +523,58 @@ class AppSafetySystemsTests(unittest.TestCase):
         snapshot = app_module.load_current_snapshot(sid)
         self.assertEqual(str(snapshot["score"].dtype), "object")
         self.assertEqual(snapshot["score"].tolist(), ["1", "2"])
+
+    def test_float_to_integer_conversion_patches_editor_and_restores_decimals_on_undo(self):
+        sid, filename, _path = self._seed_project_session_file(
+            content="record_id,monthly_spend\n1,134.4\n2,137.5\n3,200.0\n"
+        )
+        captured = {}
+
+        def fake_atomic(**kwargs):
+            captured["manifest"] = kwargs["manifest"]
+            kwargs["before_commit"](94)
+            return 94
+
+        with mock.patch.object(app_module.db, "get_cleaning_history", return_value=[]), \
+             mock.patch.object(app_module.db, "log_cleaning_action_atomic", side_effect=fake_atomic):
+            response = self.client.post("/preview_clean", data={
+                "filename": filename,
+                "persist_apply": "1",
+                "preview_scope": "feature",
+                "action_scope": "dataTypesGroup",
+                "action_name": "Applied feature only: Data Type Conversion",
+                "missing_strategy": "ignore",
+                "convert_dtypes": "0",
+                "dtype_map[monthly_spend]": "int",
+            })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        self.assertIn("patch", payload, payload)
+        patch_values = {
+            (item["row"], item["col"]): item["value"]
+            for item in payload["patch"]["changed_cells"]
+        }
+        self.assertEqual(patch_values[("0", "monthly_spend")], 134)
+        self.assertEqual(patch_values[("1", "monthly_spend")], 138)
+        self.assertNotIn(("2", "monthly_spend"), patch_values)
+
+        converted = app_module.load_current_snapshot(sid)
+        self.assertEqual(str(converted["monthly_spend"].dtype), "Int64")
+        self.assertEqual(converted["monthly_spend"].tolist(), [134, 138, 200])
+
+        undone = app_module.snapshot_diff.apply_manifest(
+            converted, captured["manifest"], "reverse"
+        )["df"]
+        self.assertEqual(str(undone["monthly_spend"].dtype), "float64")
+        self.assertEqual(undone["monthly_spend"].tolist(), [134.4, 137.5, 200.0])
+
+        reapplied = app_module.snapshot_diff.apply_manifest(
+            undone, captured["manifest"], "forward"
+        )["df"]
+        self.assertEqual(str(reapplied["monthly_spend"].dtype), "Int64")
+        self.assertEqual(reapplied["monthly_spend"].tolist(), [134, 138, 200])
 
     def test_grouped_history_splits_operations_into_their_permanent_subfeatures(self):
         history = [
@@ -518,9 +760,44 @@ class AppSafetySystemsTests(unittest.TestCase):
         payload = response.get_json()
         self.assertFalse(payload["success"])
         self.assertEqual(payload["error"]["code"], "ACTION_PERSISTENCE_FAILED")
+        self.assertIn("project history database", payload["error"]["message"])
+        self.assertIn("Check the database connection", payload["error"]["user_action"])
+        self.assertTrue(payload["error"]["request_id"])
         restored = app_module.load_current_snapshot(sid)
         self.assertEqual(restored.shape[0], 3)
         self.assertEqual(restored.to_dict(orient="records"), original.to_dict(orient="records"))
+
+    def test_apply_ui_shows_error_reason_next_step_and_diagnostic_id(self):
+        script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "script.js")
+        with open(script_path, "r", encoding="utf-8") as handle:
+            script = handle.read()
+
+        self.assertIn("function formatApiError(error, fallback = 'Operation failed')", script)
+        self.assertIn("Next: ${error.user_action}", script)
+        self.assertIn("Diagnostic ID: ${error.request_id}", script)
+        self.assertIn("showPreviewError(data.error || 'Preview failed'", script)
+        self.assertIn("window._ido.formatApiError = formatApiError", script)
+        self.assertIn("window._ido.formatApiError(data.error, 'Run failed')", script)
+        self.assertIn("window._ido.formatApiError(data.error, 'The Dataset Editor could not load.')", script)
+
+    def test_custom_code_and_outlier_validation_use_structured_errors(self):
+        _sid, filename, _path = self._seed_session_file(content="value\n1\n2\n")
+
+        empty_code = self.client.post("/preview_custom_code", data={"filename": filename, "code": ""})
+        self.assertEqual(empty_code.status_code, 400)
+        empty_payload = empty_code.get_json()
+        self.assertEqual(empty_payload["error"]["code"], "CUSTOM_CODE_EMPTY")
+        self.assertTrue(empty_payload["error"]["user_action"])
+        self.assertTrue(empty_payload["error"]["request_id"])
+
+        invalid_outliers = self.client.post("/preview_outliers", data={
+            "filename": filename,
+            "outlier_columns": "not-json",
+        })
+        self.assertEqual(invalid_outliers.status_code, 422)
+        outlier_payload = invalid_outliers.get_json()
+        self.assertEqual(outlier_payload["error"]["code"], "OUTLIER_SELECTION_INVALID")
+        self.assertTrue(outlier_payload["error"]["user_action"])
 
     def test_legacy_log_action_endpoint_is_not_authoritative(self):
         with self.client.session_transaction() as sess:
@@ -696,6 +973,21 @@ class AppSafetySystemsTests(unittest.TestCase):
         self.assertNotIn("history_entry", payload)
         log_atomic.assert_not_called()
 
+    def test_snapshot_replace_retries_short_windows_file_lock(self):
+        calls = {"count": 0}
+
+        def flaky_replace(tmp_path, final_path):
+            calls["count"] += 1
+            if calls["count"] < 3:
+                raise PermissionError("file is temporarily locked")
+
+        with mock.patch.object(app_module.os, "replace", side_effect=flaky_replace), \
+             mock.patch.object(app_module.time, "sleep") as sleep:
+            app_module._replace_snapshot_file("snapshot.tmp", "snapshot.feather")
+
+        self.assertEqual(calls["count"], 3)
+        self.assertEqual(sleep.call_count, 2)
+
     def test_full_row_evidence_contains_all_columns_and_changed_markers(self):
         before = pd.DataFrame({"record_id": [10], "name": [" old "], "score": [4]}, index=[7])
         after = pd.DataFrame({"record_id": [10], "name": ["old"], "score": [4]}, index=[7])
@@ -726,6 +1018,30 @@ class AppSafetySystemsTests(unittest.TestCase):
         self.assertNotEqual(actions[0]["action_name"], actions[1]["action_name"])
         self.assertEqual(actions[0]["action_config"]["preview"]["after_shape"], [1, 2])
         self.assertEqual(actions[1]["action_config"]["preview"]["before_shape"], [1, 2])
+
+    def test_dtype_history_split_ignores_bookkeeping_skip_missing_operation(self):
+        before = pd.DataFrame({"booking_date": ["27-04-22", "28-04-22"]}, index=[0, 1])
+        after = before.copy()
+        after["booking_date"] = pd.to_datetime(after["booking_date"], dayfirst=True)
+        manifest = app_module._operation_manifest(
+            before,
+            after,
+            [{"action": "manual_convert_dtypes", "changes": {
+                "booking_date": {"from": "object", "to": "datetime64[ns]", "requested": "datetime"}
+            }}],
+        )
+        operations = [
+            {"action": "manual_convert_dtypes", "changes": {
+                "booking_date": {"from": "object", "to": "datetime64[ns]", "requested": "datetime"}
+            }},
+            {"action": "skip_missing_values", "reason": "not selected for this preview"},
+        ]
+        actions = app_module._sequential_history_actions(
+            before, after, operations, manifest, "Manual Column Type Conversion", "dataTypesGroup", 90.0
+        )
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["action_name"], "manual_convert_dtypes")
+        self.assertEqual(actions[0]["action_config"]["operations"][0]["action"], "manual_convert_dtypes")
 
 
 if __name__ == "__main__":

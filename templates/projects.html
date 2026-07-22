@@ -328,6 +328,27 @@
       white-space: nowrap;
     }
     .btn-resume:hover { background: var(--brand-dark); }
+    .btn-resume.is-loading {
+      opacity: .82;
+      pointer-events: none;
+      cursor: wait;
+    }
+    .btn-resume.is-loading::before {
+      content: "";
+      width: 12px;
+      height: 12px;
+      border: 2px solid currentColor;
+      border-right-color: transparent;
+      border-radius: 50%;
+      animation: resume-spin .7s linear infinite;
+    }
+    .btn-resume.is-muted {
+      opacity: .55;
+      pointer-events: none;
+    }
+    @keyframes resume-spin {
+      to { transform: rotate(360deg); }
+    }
 
     .btn-ghost {
       display: inline-flex;
@@ -584,6 +605,32 @@ document.querySelectorAll('.card').forEach(card => {
     noteInput.addEventListener('input', saveNote);
   }
 });
+
+function resetResumeButtons() {
+  document.querySelectorAll('.btn-resume').forEach(btn => {
+    btn.classList.remove('is-loading', 'is-muted');
+    btn.removeAttribute('aria-busy');
+    if (btn.dataset.originalText) {
+      btn.textContent = btn.dataset.originalText;
+      delete btn.dataset.originalText;
+    }
+  });
+}
+
+document.querySelectorAll('.btn-resume').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.classList.contains('is-loading')) return;
+    btn.dataset.originalText = btn.textContent.trim();
+    document.querySelectorAll('.btn-resume').forEach(other => {
+      if (other !== btn) other.classList.add('is-muted');
+    });
+    btn.classList.add('is-loading');
+    btn.setAttribute('aria-busy', 'true');
+    btn.textContent = 'Resuming...';
+  });
+});
+
+window.addEventListener('pageshow', resetResumeButtons);
 </script>
 <script src="{{ url_for('static', filename='desktop_downloads.js', v=static_version('desktop_downloads.js')) }}" defer></script>
 
