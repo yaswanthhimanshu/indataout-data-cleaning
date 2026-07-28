@@ -1292,7 +1292,15 @@ def build_grouped_cleaning_history(history: list[dict]) -> list[dict]:
             if subfeature_key:
                 target = next(item["actions"] for item in group["subfeatures"] if item["key"] == subfeature_key)
 
-            preview = _preview_for_history_operation(source_preview, op) if op else source_preview
+            preview = (
+                _preview_for_history_operation(source_preview, op)
+                if op and len(card_operations) > 1
+                else source_preview
+            )
+            display_preview = {
+                key: value for key, value in preview.items()
+                if key not in {"displayed_change_count", "displayed_row_count", "is_sample", "limit"}
+            }
             pairs = _history_pairs_from_preview(preview)
             if not pairs and op:
                 pairs = _history_pairs_for_operation(op)
@@ -1311,6 +1319,7 @@ def build_grouped_cleaning_history(history: list[dict]) -> list[dict]:
                 "operations": [op] if op else [],
                 "pairs": pairs,
                 "preview": preview,
+                "display_preview": display_preview,
                 "config": config,
             }))
 

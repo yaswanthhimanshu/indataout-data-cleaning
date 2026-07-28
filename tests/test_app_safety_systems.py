@@ -694,6 +694,58 @@ class AppSafetySystemsTests(unittest.TestCase):
             [("fully_empty", "Column existed", "Dropped"), ("Unnamed: 16", "Column existed", "Dropped")],
         )
 
+    def test_single_operation_history_preserves_totals_for_bounded_preview(self):
+        preview_cells = [
+            {
+                "row_id": row,
+                "row_number": row + 1,
+                "column": "Income",
+                "before": None,
+                "after": 107658.0,
+            }
+            for row in range(25)
+        ]
+        history = [{
+            "id": 43,
+            "action_name": "fill_numeric",
+            "action_config": {
+                "activePanelId": "missingValuesGroup",
+                "operations": [{
+                    "action": "fill_numeric",
+                    "filled_cells": 70,
+                    "columns_processed": ["Income"],
+                }],
+                "preview": {
+                    "changed_cells": preview_cells,
+                    "removed_rows": [],
+                    "added_rows": [],
+                    "removed_columns": [],
+                    "added_columns": [],
+                    "dtype_changes": [],
+                    "total_changed_cells": 70,
+                    "total_change_count": 70,
+                    "displayed_change_count": 25,
+                    "is_sample": True,
+                    "limit": 25,
+                },
+            },
+            "rows_before": 100,
+            "rows_after": 100,
+            "cells_changed": 70,
+            "status": "applied",
+        }]
+
+        action = app_module.build_grouped_cleaning_history(history)[1]["actions"][0]
+
+        self.assertEqual(action["preview"]["total_changed_cells"], 70)
+        self.assertEqual(action["preview"]["total_change_count"], 70)
+        self.assertEqual(action["preview"]["displayed_change_count"], 25)
+        self.assertTrue(action["preview"]["is_sample"])
+        self.assertNotIn("displayed_change_count", action["display_preview"])
+        self.assertNotIn("is_sample", action["display_preview"])
+        self.assertNotIn("limit", action["display_preview"])
+        self.assertEqual(action["display_preview"]["total_changed_cells"], 70)
+
     def test_resume_replay_returns_authoritative_snapshot_without_browser_ledger(self):
         sid, filename, _path = self._seed_project_session_file(content="name,value\n a ,1\nb,2\n")
         current = pd.DataFrame({"name": ["a", "b"], "value": [1, 2]})

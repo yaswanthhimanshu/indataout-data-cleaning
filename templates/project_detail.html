@@ -517,7 +517,6 @@
             <div class="history-meta-row">
               {% if action.operation %}<span class="history-meta">Operation: {{ action.operation.replace('_', ' ').title() }}</span>{% endif %}
               {% if action.rows_before != action.rows_after %}<span class="history-meta">Rows {{ action.rows_before }} -> {{ action.rows_after }}</span>{% endif %}
-              {% if action.cells_changed %}<span class="history-meta">{{ action.cells_changed }} changes recorded</span>{% endif %}
             </div>
             {% if action.pairs %}
               <div class="history-ba-wrap">
@@ -536,9 +535,9 @@
             <div class="history-action-controls">
               <button type="button" class="history-control" disabled title="Resume this project to change action status.">Undo</button>
               <button type="button" class="history-control" disabled title="Resume this project to change action status.">Reapply</button>
-              <button type="button" class="history-view-details">View Full Changes</button>
+              <button type="button" class="history-view-details">View Details</button>
             </div>
-            <pre class="history-detail-json">{{ action.preview | tojson(indent=2) }}</pre>
+            <pre class="history-detail-json">{{ action.display_preview | tojson(indent=2) }}</pre>
           </div>
         {% endmacro %}
         {% if grouped_history %}
