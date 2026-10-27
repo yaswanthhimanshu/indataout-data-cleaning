@@ -526,7 +526,7 @@ class AppSafetySystemsTests(unittest.TestCase):
 
     def test_float_to_integer_conversion_patches_editor_and_restores_decimals_on_undo(self):
         sid, filename, _path = self._seed_project_session_file(
-            content="record_id,monthly_spend\n1,134.4\n2,137.5\n3,200.0\n"
+            content="record_id,monthly_spend\n1,134.4\n2,137.5\n3,200.0\n4,-10.7\n5,10.7\n"
         )
         captured = {}
 
@@ -557,24 +557,26 @@ class AppSafetySystemsTests(unittest.TestCase):
             for item in payload["patch"]["changed_cells"]
         }
         self.assertEqual(patch_values[("0", "monthly_spend")], 134)
-        self.assertEqual(patch_values[("1", "monthly_spend")], 138)
+        self.assertEqual(patch_values[("1", "monthly_spend")], 137)
+        self.assertEqual(patch_values[("3", "monthly_spend")], -10)
+        self.assertEqual(patch_values[("4", "monthly_spend")], 10)
         self.assertNotIn(("2", "monthly_spend"), patch_values)
 
         converted = app_module.load_current_snapshot(sid)
         self.assertEqual(str(converted["monthly_spend"].dtype), "Int64")
-        self.assertEqual(converted["monthly_spend"].tolist(), [134, 138, 200])
+        self.assertEqual(converted["monthly_spend"].tolist(), [134, 137, 200, -10, 10])
 
         undone = app_module.snapshot_diff.apply_manifest(
             converted, captured["manifest"], "reverse"
         )["df"]
         self.assertEqual(str(undone["monthly_spend"].dtype), "float64")
-        self.assertEqual(undone["monthly_spend"].tolist(), [134.4, 137.5, 200.0])
+        self.assertEqual(undone["monthly_spend"].tolist(), [134.4, 137.5, 200.0, -10.7, 10.7])
 
         reapplied = app_module.snapshot_diff.apply_manifest(
             undone, captured["manifest"], "forward"
         )["df"]
         self.assertEqual(str(reapplied["monthly_spend"].dtype), "Int64")
-        self.assertEqual(reapplied["monthly_spend"].tolist(), [134, 138, 200])
+        self.assertEqual(reapplied["monthly_spend"].tolist(), [134, 137, 200, -10, 10])
 
     def test_grouped_history_splits_operations_into_their_permanent_subfeatures(self):
         history = [
@@ -1003,6 +1005,60 @@ class AppSafetySystemsTests(unittest.TestCase):
         promote.assert_called_once_with(tmp_path, final_path)
         self.assertEqual(set_status.call_args.args[:4], (77, 123, "undone", 0))
         apply_manifest.assert_not_called()
+
+    def test_apply_manifest_explains_later_action_dependency(self):
+        self._seed_project_session_file(content="x\n1\n2\n")
+        target = {
+            "id": 174,
+            "status": "applied",
+            "action_name": "custom_pandas_code",
+            "action_config": {"label": "Applied custom Pandas code"},
+        }
+        dependent = {
+            "id": 175,
+            "status": "applied",
+            "action_name": "manual_convert_dtypes",
+            "action_config": {"label": "Converted 1 data types"},
+        }
+        conflict = app_module.ActionReplayConflict(
+            175,
+            "dtype change on missing column 'spend_per_order' skipped (column no longer exists)",
+        )
+
+        with mock.patch.object(
+            app_module.db,
+            "get_cleaning_action",
+            side_effect=[target, dependent],
+        ), mock.patch.object(app_module, "replay_project_actions", side_effect=conflict):
+            response = self.client.post(
+                "/apply_manifest",
+                json={"history_id": 174, "direction": "reverse"},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.get_json()
+        self.assertEqual(payload["error"]["code"], "ACTION_DEPENDENCY_CONFLICT")
+        self.assertIn("later 'Convert Data Types' action", payload["error"]["message"])
+        self.assertIn("column 'spend_per_order'", payload["error"]["message"])
+        self.assertIn("No changes were made", payload["error"]["message"])
+        self.assertEqual(
+            payload["error"]["user_action"],
+            "Undo 'Convert Data Types' first, then retry Undo on 'Custom Pandas Code'.",
+        )
+        self.assertEqual(payload["error"]["details"]["dependent_history_id"], 175)
+
+    def test_error_notifications_are_persistent_and_dismissible(self):
+        base = os.path.dirname(app_module.__file__)
+        with open(os.path.join(base, "static", "script.js"), encoding="utf-8") as f:
+            script = f.read()
+        with open(os.path.join(base, "templates", "index.html"), encoding="utf-8") as f:
+            template = f.read()
+
+        self.assertIn("options.persistent ?? type === 'error'", script)
+        self.assertIn("operationProgress.finish('error', errorMessage)", script)
+        self.assertNotIn("finish('error', 'Undo failed — nothing changed')", script)
+        self.assertNotIn("finish('error', 'Reapply failed — nothing changed')", script)
+        self.assertIn('id="operationProgressDismiss"', template)
 
     def test_noop_committed_apply_does_not_create_replay_history_gap(self):
         sid, filename, _path = self._seed_project_session_file(content="x,y\nA,1\nB,2\n")

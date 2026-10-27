@@ -51,7 +51,10 @@
 <div id="operationProgress" class="operation-progress" aria-live="polite" role="status" hidden>
   <div class="operation-progress-head">
     <strong id="operationProgressName">Working</strong>
-    <span id="operationProgressElapsed">0s</span>
+    <div class="operation-progress-meta">
+      <span id="operationProgressElapsed">0s</span>
+      <button type="button" id="operationProgressDismiss" class="operation-progress-dismiss" aria-label="Dismiss status" title="Dismiss status" hidden>&times;</button>
+    </div>
   </div>
   <div id="operationProgressStage" class="operation-progress-stage">Starting...</div>
   <div class="operation-progress-bar" aria-hidden="true">

@@ -2335,6 +2335,32 @@ def _ensure_project_source_available(project: dict) -> tuple[str | None, str | N
         return None, candidate
 
 
+class ActionReplayConflict(RuntimeError):
+    """An active history action cannot be replayed against the requested state."""
+
+    def __init__(self, history_id: int, conflict: str):
+        self.history_id = int(history_id)
+        self.conflict = str(conflict)
+        super().__init__(f"Action {self.history_id} replay conflict: {self.conflict}")
+
+
+def _history_action_label(entry: dict | None) -> str:
+    entry = entry or {}
+    action_name = str(entry.get("action_name") or "").strip().lower()
+    stable_labels = {
+        "custom_pandas_code": "Custom Pandas Code",
+        "manual_convert_dtypes": "Convert Data Types",
+        "convert_dtypes": "Convert Data Types",
+        "manual_cell_updates": "Dataset Cell Edit",
+        "manual_outlier_removal": "Remove Outlier Rows",
+    }
+    if action_name in stable_labels:
+        return stable_labels[action_name]
+    config = entry.get("action_config") or {}
+    configured_label = config.get("label") if isinstance(config, dict) else None
+    return _titleize_action(configured_label or entry.get("action_name") or "cleaning action")
+
+
 def replay_project_actions(project_id: int, target_status: dict | None = None) -> tuple[pd.DataFrame, list[dict]]:
     """Rebuild project state by replaying active actions in original order.
 
@@ -2372,7 +2398,7 @@ def replay_project_actions(project_id: int, target_status: dict | None = None) -
             raise RuntimeError(f"Action {history_id} cannot be replayed because its manifest is missing.")
         result = snapshot_diff.apply_manifest(df, manifest, "forward")
         if result.get("conflicts"):
-            raise RuntimeError(f"Action {history_id} replay conflict: {result['conflicts'][0]}")
+            raise ActionReplayConflict(history_id, result["conflicts"][0])
         df = result["df"]
     return df, history
 
@@ -4274,6 +4300,48 @@ def apply_manifest_route():
     target_status = {history_id_int: new_status}
     try:
         new_df, _history = replay_project_actions(project_id, target_status=target_status)
+    except ActionReplayConflict as e:
+        logging.info(
+            "apply_manifest dependency conflict target_history_id=%s dependent_history_id=%s conflict=%s",
+            history_id_int, e.history_id, e.conflict,
+        )
+        try:
+            dependent_row = db.get_cleaning_action(e.history_id, project_id)
+        except Exception:
+            dependent_row = None
+        target_label = _history_action_label(row)
+        dependent_label = _history_action_label(dependent_row)
+        column_match = re.search(r"missing column\s+['\"]([^'\"]+)['\"]", e.conflict, flags=re.IGNORECASE)
+        column_text = f" column '{column_match.group(1)}'" if column_match else " data produced by that action"
+        operation = "undo" if direction == "reverse" else "reapply"
+
+        if direction == "reverse" and e.history_id != history_id_int:
+            message = (
+                f"Cannot undo '{target_label}' because the later '{dependent_label}' action still depends on"
+                f"{column_text}. No changes were made."
+            )
+            user_action = f"Undo '{dependent_label}' first, then retry Undo on '{target_label}'."
+        else:
+            message = (
+                f"Cannot {operation} '{target_label}' because '{dependent_label}' could not be replayed safely: "
+                f"{e.conflict}. No changes were made."
+            )
+            user_action = "Review or undo the named conflicting action, then retry."
+
+        return api_error(
+            "ACTION_DEPENDENCY_CONFLICT",
+            message,
+            status=409,
+            user_action=user_action,
+            retryable=False,
+            details={
+                "target_history_id": history_id_int,
+                "dependent_history_id": e.history_id,
+                "target_action": target_label,
+                "dependent_action": dependent_label,
+                "conflict": e.conflict,
+            },
+        )
     except Exception as e:
         logging.exception("apply_manifest: ordered replay failed")
         message, user_action = _operation_failure_explanation(e, "process")

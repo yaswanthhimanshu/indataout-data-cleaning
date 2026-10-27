@@ -663,7 +663,7 @@ def convert_dtypes(df: pd.DataFrame, dtype_map: Optional[Dict[str, str]] = None)
 
     ``dtype_map`` is an optional mapping such as ``{"col": "datetime"}``.
     When a map is supplied, unmentioned columns are left untouched. Metadata
-    records requested dtype, actual dtype, coercion count, rounding count where
+    records requested dtype, actual dtype, coercion count, truncation count where
     relevant, and failure notes so previews/reports can explain destructive
     conversions instead of presenting them as clean success.
     """
@@ -785,15 +785,12 @@ def convert_dtypes(df: pd.DataFrame, dtype_map: Optional[Dict[str, str]] = None)
             elif choice == "int":
                 conv = pd.to_numeric(df[c], errors="coerce")
                 coerced = int(df[c].notna().sum() - conv.notna().sum()) if df[c].notna().any() else 0
-                # Round non-whole values first — pandas refuses a direct cast to
-                # Int64 if any value has a real decimal part (raises rather than
-                # silently truncating). Report how many were rounded so the
-                # Change Log states this plainly instead of changing values with
-                # no record of it.
-                rounded_mask = conv.notna() & (conv != conv.round())
-                rounded_count = int(rounded_mask.sum())
-                df[c] = conv.round().astype("Int64")
-                info.update({"to": str(df[c].dtype), "coerced": int(coerced), "rounded": rounded_count})
+                # Match Python int(): discard the fraction toward zero. Keep
+                # existing integers out of floating point to preserve precision.
+                truncated = conv if pd.api.types.is_integer_dtype(conv.dtype) else np.trunc(conv)
+                truncated_count = int((conv.notna() & (conv != truncated)).sum())
+                df[c] = truncated.astype("Int64")
+                info.update({"to": str(df[c].dtype), "coerced": int(coerced), "truncated": truncated_count})
             elif choice == "float":
                 conv = pd.to_numeric(df[c], errors="coerce").astype("float64")
                 coerced = int(df[c].notna().sum() - conv.notna().sum()) if df[c].notna().any() else 0

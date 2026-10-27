@@ -558,6 +558,17 @@ function indataoutInstallRequestAndProgress() {
   let progressTimer = null;
   let progressHideTimer = null;
   let progressStarted = 0;
+  const progressDismiss = document.getElementById('operationProgressDismiss');
+  if (progressDismiss && !progressDismiss.dataset.bound) {
+    progressDismiss.dataset.bound = '1';
+    progressDismiss.addEventListener('click', () => {
+      const box = document.getElementById('operationProgress');
+      clearInterval(progressTimer);
+      clearTimeout(progressHideTimer);
+      progressHideTimer = null;
+      if (box) box.hidden = true;
+    });
+  }
   function updateElapsed() {
     const el = document.getElementById('operationProgressElapsed');
     if (!el || !progressStarted) return;
@@ -575,9 +586,11 @@ function indataoutInstallRequestAndProgress() {
       const n = document.getElementById('operationProgressName');
       const s = document.getElementById('operationProgressStage');
       const r = document.getElementById('operationProgressResult');
+      const dismiss = document.getElementById('operationProgressDismiss');
       if (n) n.textContent = name || 'Working';
       if (s) s.textContent = stage || 'Starting...';
       if (r) r.textContent = '';
+      if (dismiss) dismiss.hidden = true;
       clearInterval(progressTimer);
       updateElapsed();
       progressTimer = setInterval(updateElapsed, 1000);
@@ -599,6 +612,8 @@ function indataoutInstallRequestAndProgress() {
       if (s) s.textContent = kind === 'error' ? 'Could not complete' : 'Completed';
       const r = document.getElementById('operationProgressResult');
       if (r) r.textContent = message || (kind === 'error' ? 'Failed' : 'Completed');
+      const dismiss = document.getElementById('operationProgressDismiss');
+      if (dismiss) dismiss.hidden = false;
     },
     hideLater(ms = 8000) {
       const box = document.getElementById('operationProgress');
@@ -827,7 +842,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   let lastSnapshot = cleanForm ? snapshotForm(cleanForm) : [];
 
-  function showToast(message, type = 'warning') {
+  function showToast(message, type = 'warning', options = {}) {
     let region = document.getElementById('appToastRegion');
     if (!region) {
       region = document.createElement('div');
@@ -837,13 +852,28 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const toast = document.createElement('div');
     toast.className = `app-toast app-toast-${type}`;
-    toast.textContent = message;
+    toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
+    const messageEl = document.createElement('span');
+    messageEl.className = 'app-toast-message';
+    messageEl.textContent = message;
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.className = 'app-toast-dismiss';
+    dismiss.setAttribute('aria-label', 'Dismiss notification');
+    dismiss.title = 'Dismiss notification';
+    dismiss.textContent = '\u00d7';
+    dismiss.addEventListener('click', () => toast.remove());
+    toast.append(messageEl, dismiss);
     region.appendChild(toast);
     setTimeout(() => toast.classList.add('show'), 20);
-    setTimeout(() => {
-      toast.classList.remove('show');
-      setTimeout(() => toast.remove(), 220);
-    }, 3600);
+    const persistent = options.persistent ?? type === 'error';
+    if (!persistent) {
+      const visibleMs = type === 'success' ? 4800 : 10000;
+      setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => toast.remove(), 220);
+      }, visibleMs);
+    }
   }
   // Bridge — called as window._ido.showToast(...) both later in this same
   // closure (_applyManifestOnServer) and potentially from others, but this
@@ -3808,9 +3838,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (data.error?.code === 'STALE_DATASET_VERSION') {
           await window._ido.refreshCurrentProjectFromServer(data.error?.details?.current_version);
         }
-        if (window._ido.showToast) {
-          window._ido.showToast(window._ido.formatApiError(data.error || data.reason, 'Undo/Reapply failed. No changes were made.'), 'error');
-        }
+        const errorMessage = window._ido.formatApiError(data.error || data.reason, 'Undo/Reapply failed. No changes were made.');
+        if (window._ido.showToast) window._ido.showToast(errorMessage, 'error');
+        if (window._ido.operationProgress) window._ido.operationProgress.finish('error', errorMessage);
         return false;  // no_manifest / no_snapshot / etc. — fall back
       }
       try {
@@ -3824,9 +3854,9 @@ document.addEventListener('DOMContentLoaded', () => {
       return true;
     } catch (e) {
       console.warn('apply_manifest request failed:', e);
-      if (window._ido.showToast) {
-        window._ido.showToast('Undo/Reapply could not reach the server. Nothing was changed. Next: Check that the app is still running, then retry.', 'error');
-      }
+      const errorMessage = 'Undo/Reapply could not reach the server. Nothing was changed. Next: Check that the app is still running, then retry.';
+      if (window._ido.showToast) window._ido.showToast(errorMessage, 'error');
+      if (window._ido.operationProgress) window._ido.operationProgress.finish('error', errorMessage);
       return false;
     }
   }
@@ -5243,7 +5273,6 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!action) continue;
       const handledByServer = await _applyManifestOnServer(action, 'reverse');
       if (!handledByServer) {
-        if (window._ido.operationProgress) window._ido.operationProgress.finish('error', 'Undo failed — nothing changed');
         return;
       }
 
@@ -5295,7 +5324,6 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!action) continue;
       const handledByServer = await _applyManifestOnServer(action, 'forward');
       if (!handledByServer) {
-        if (window._ido.operationProgress) window._ido.operationProgress.finish('error', 'Reapply failed — nothing changed');
         return;
       }
 

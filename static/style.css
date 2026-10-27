@@ -83,6 +83,9 @@ code {
   padding: 12px 14px;
   transform: translateY(-8px);
   transition: opacity var(--transition), transform var(--transition);
+  pointer-events: auto;
+  position: relative;
+  padding-right: 40px;
 }
 .app-toast.show {
   opacity: 1;
@@ -91,6 +94,32 @@ code {
 .app-toast-warning { border-left-color: var(--warning); }
 .app-toast-success { border-left-color: var(--success); }
 .app-toast-error { border-left-color: var(--error); }
+.app-toast-message { display: block; white-space: pre-line; }
+.app-toast-dismiss,
+.operation-progress-dismiss {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+.app-toast-dismiss {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+}
+.app-toast-dismiss:hover,
+.operation-progress-dismiss:hover { background: rgba(15, 23, 42, 0.1); }
+.app-toast-dismiss:focus-visible,
+.operation-progress-dismiss:focus-visible { outline: 2px solid currentColor; outline-offset: 1px; }
 
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
@@ -2431,6 +2460,15 @@ code {
   gap: 12px;
   font-size: 13px;
 }
+
+.operation-progress-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.operation-progress-dismiss[hidden] { display: none; }
 
 .operation-progress-stage,
 .operation-progress-result {

@@ -20,6 +20,55 @@ import snapshot_diff
 class CleaningCoreCorrectnessTests(unittest.TestCase):
     """Core transformation and manifest invariants independent of Flask routes."""
 
+    def test_manual_integer_conversion_truncates_toward_zero(self):
+        values = [10.7, -10.7, 10.5, -10.5, 0.9, -0.9, 200.0, None]
+        for dtype in ("float64", "Float64"):
+            with self.subTest(dtype=dtype):
+                original = pd.DataFrame({"amount": pd.Series(values, dtype=dtype), "other": range(8)})
+                converted, meta = cleaner.convert_dtypes(original, {"amount": "int"})
+                pd.testing.assert_series_equal(
+                    converted["amount"],
+                    pd.Series([10, -10, 10, -10, 0, 0, 200, pd.NA], dtype="Int64", name="amount"),
+                )
+                self.assertEqual(meta["amount"]["truncated"], 6)
+                self.assertEqual(meta["amount"]["coerced"], 0)
+                self.assertTrue(meta["amount"]["success"])
+                pd.testing.assert_series_equal(converted["other"], original["other"])
+                self.assertEqual(original.loc[0, "amount"], 10.7)
+
+    def test_manual_integer_conversion_preserves_large_integers_and_missing_values(self):
+        original = pd.DataFrame({"amount": pd.Series([2**53 + 1, -(2**53 + 1), pd.NA], dtype="Int64")})
+        converted, meta = cleaner.convert_dtypes(original, {"amount": "int"})
+        pd.testing.assert_frame_equal(converted, original)
+        self.assertEqual(meta["amount"]["truncated"], 0)
+
+    def test_manual_integer_conversion_numeric_strings_and_invalid_text(self):
+        original = pd.DataFrame({"amount": ["10.7", "-10.7", "bad", None]})
+        converted, meta = cleaner.convert_dtypes(original, {"amount": "int"})
+        pd.testing.assert_series_equal(
+            converted["amount"], pd.Series([10, -10, pd.NA, pd.NA], dtype="Int64", name="amount")
+        )
+        self.assertEqual(meta["amount"]["truncated"], 2)
+        self.assertEqual(meta["amount"]["coerced"], 1)
+
+    def test_integer_to_float_does_not_restore_discarded_decimals(self):
+        original = pd.DataFrame({"amount": [10.7, -10.7, None]})
+        integers, _ = cleaner.convert_dtypes(original, {"amount": "int"})
+        floats, meta = cleaner.convert_dtypes(integers, {"amount": "float"})
+        pd.testing.assert_series_equal(
+            floats["amount"], pd.Series([10.0, -10.0, np.nan], name="amount")
+        )
+        self.assertTrue(meta["amount"]["success"])
+
+    def test_legacy_rounded_integer_manifest_keeps_saved_values(self):
+        before = pd.DataFrame({"amount": [10.7, -10.7]})
+        after = pd.DataFrame({"amount": pd.Series([11, -11], dtype="Int64")})
+        manifest = json.loads(json.dumps(snapshot_diff.compute_full_diff(before, after)))
+        replayed = snapshot_diff.apply_manifest(before, manifest, "forward")["df"]
+        pd.testing.assert_frame_equal(replayed, after)
+        undone = snapshot_diff.apply_manifest(replayed, manifest, "reverse")["df"]
+        pd.testing.assert_frame_equal(undone, before)
+
     def test_mixed_type_whitespace_trimming_only_strips_strings(self):
         df = pd.DataFrame({"mixed": [" a ", 5, True, None]})
         cleaned, report = cleaner.clean_dataframe(
